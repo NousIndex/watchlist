@@ -2,8 +2,9 @@
 import { useEffect, useRef, useState } from "react";
 import { createChart, ColorType, type IChartApi } from "lightweight-charts";
 import { useQuotes, useWatchlist, tabsWithSymbol } from "@/lib/store";
-import { fmtPrice, fmtChange, fmtPct, fmtBig, symbolColor } from "@/lib/format";
+import { fmtPrice, fmtChange, fmtPct, fmtBig } from "@/lib/format";
 import { isCrypto, cryptoPair, cryptoBase, displaySymbol } from "@/lib/crypto";
+import { Avatar } from "./Avatar";
 
 const RANGES = ["1D", "1W", "1M", "6M", "1Y", "5Y"] as const;
 
@@ -217,15 +218,7 @@ export function ChartModal({ symbol, onClose }: { symbol: string; onClose: () =>
     <div className="chart-modal">
       <div className="chart-hdr">
         <div className="chart-id">
-          <div className="avatar" style={{ background: symbolColor(symbol) }}>
-            {profile?.logo ? (
-              <img src={profile.logo} alt="" loading="lazy" />
-            ) : crypto ? (
-              cryptoBase(symbol).slice(0, 4)
-            ) : (
-              displaySymbol(symbol).replace(/\..*$/, "").slice(0, 4)
-            )}
-          </div>
+          <Avatar symbol={symbol} logo={profile?.logo} />
           <div>
             <div className="c-sym">
               {displaySymbol(symbol)}

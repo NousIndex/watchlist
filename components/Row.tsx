@@ -4,8 +4,9 @@ import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { useQuotes, useWatchlist } from "@/lib/store";
 import { engine } from "@/lib/engine";
-import { fmtPrice, fmtChange, fmtPct, symbolColor } from "@/lib/format";
-import { isCrypto, isYahooCrypto, cryptoBase, displaySymbol } from "@/lib/crypto";
+import { fmtPrice, fmtChange, fmtPct } from "@/lib/format";
+import { isCrypto, isYahooCrypto, displaySymbol } from "@/lib/crypto";
+import { Avatar } from "./Avatar";
 
 interface Props {
   symbol: string;
@@ -82,15 +83,7 @@ function RowInner({ symbol, editMode, onOpen, onRemove }: Props) {
           ⊖
         </button>
       )}
-      <div className="avatar" style={{ background: symbolColor(symbol) }}>
-        {profile?.logo ? (
-          <img src={profile.logo} alt="" loading="lazy" />
-        ) : isCrypto(symbol) ? (
-          cryptoBase(symbol).slice(0, 4)
-        ) : (
-          displaySymbol(symbol).replace(/\..*$/, "").slice(0, 4)
-        )}
-      </div>
+      <Avatar symbol={symbol} logo={profile?.logo} />
       <div className="mid">
         <div className="sym">{displaySymbol(symbol)}</div>
         <div className="name">

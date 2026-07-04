@@ -121,6 +121,9 @@ export async function GET(req: Request) {
     if (hit) return NextResponse.json(hit.body); // stale beats nothing
     const td = await fromTwelveData(symbolRaw, cfg);
     if ("candles" in td) out = td;
+    // Name both failures — this string surfaces in the chart modal, and it's
+    // the only visibility we have into what went wrong on the deployment.
+    else out = { error: `yahoo: ${out.error} · twelvedata: ${td.error}` };
   }
   if (!("candles" in out)) {
     return NextResponse.json({ error: (out as any).error || "no data" }, { status: 502 });

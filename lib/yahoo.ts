@@ -43,20 +43,58 @@ const BROWSER_CIPHERS = [
  * connection starts 429ing, every request reusing it keeps 429ing. Fresh
  * connections avoid that; volume here is tiny (user-initiated + cached).
  */
-export async function yahooGetJson(url: string): Promise<{ status: number; json: any | null }> {
-  const first = await yahooGetOnce(url);
-  if (first.status !== 429) return first;
-  // Throttling is per connection attempt and flappy; one spaced retry on a
-  // fresh connection often passes.
-  await new Promise((r) => setTimeout(r, 900));
-  return yahooGetOnce(url);
+// Yahoo's edge is far more lenient to requests carrying a valid session
+// cookie — without one, datacenter IPs (Vercel) get 429'd aggressively.
+// fc.yahoo.com hands out an A1 cookie to anyone (the response itself is a
+// 404; only the set-cookie matters). Cached per process.
+let a1Cookie: string | null = null;
+let a1At = 0;
+const A1_TTL_MS = 60 * 60_000;
+
+function fetchA1Cookie(): Promise<string | null> {
+  return new Promise((resolve) => {
+    const req = https.get(
+      "https://fc.yahoo.com/",
+      { headers: YAHOO_HEADERS, agent: false, timeout: 6_000, ciphers: BROWSER_CIPHERS },
+      (res) => {
+        const a1 = (res.headers["set-cookie"] || []).find((c) => c.startsWith("A1="));
+        res.resume();
+        if (a1) {
+          a1Cookie = a1.split(";")[0];
+          a1At = Date.now();
+        }
+        resolve(a1Cookie);
+      }
+    );
+    req.on("timeout", () => req.destroy(new Error("timeout")));
+    req.on("error", () => resolve(a1Cookie));
+  });
 }
 
-function yahooGetOnce(url: string): Promise<{ status: number; json: any | null }> {
+export async function yahooGetJson(url: string): Promise<{ status: number; json: any | null }> {
+  const cookie = a1Cookie && Date.now() - a1At < A1_TTL_MS ? a1Cookie : null;
+  const first = await yahooGetOnce(url, cookie);
+  if (first.status === 200) return first;
+  if (first.status !== 429 && first.status !== 0) return first;
+  // Throttling is per connection attempt and flappy; one spaced retry on a
+  // fresh connection often passes. Grab a session cookie if we didn't have
+  // one, and retry against query2 — Yahoo's edges rate-limit independently,
+  // so one host can pass while the other 429s.
+  const retryCookie = cookie ?? (await fetchA1Cookie());
+  await new Promise((r) => setTimeout(r, 900));
+  const second = await yahooGetOnce(url.replace("//query1.", "//query2."), retryCookie);
+  return second.status === 200 || first.status === 0 ? second : first;
+}
+
+function yahooGetOnce(
+  url: string,
+  cookie: string | null = null
+): Promise<{ status: number; json: any | null }> {
+  const headers = cookie ? { ...YAHOO_HEADERS, Cookie: cookie } : YAHOO_HEADERS;
   return new Promise((resolve) => {
     const req = https.get(
       url,
-      { headers: YAHOO_HEADERS, agent: false, timeout: 6_000, ciphers: BROWSER_CIPHERS },
+      { headers, agent: false, timeout: 6_000, ciphers: BROWSER_CIPHERS },
       (res) => {
       const chunks: Buffer[] = [];
       res.on("data", (c) => chunks.push(c));

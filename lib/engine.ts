@@ -8,7 +8,7 @@ import { isCrypto, cryptoPair, CRYPTO_PREFIX } from "./crypto";
  * Stocks/ETFs (Finnhub):
  * - One rate-limited REST queue (~46/min, under the 60/min free cap; search
  *   shares the budget). Priority: visible & unloaded > visible & stale >
- *   unloaded > off-screen stale > missing logos.
+ *   visible missing profile > unloaded > off-screen stale > missing profiles.
  * - Websocket streams trades for visible rows (free cap: 50 subs).
  *
  * Crypto (Binance public API, no key, browser-direct):
@@ -26,6 +26,8 @@ class QuoteEngine {
   private started = false;
   private visible = new Set<string>();
   private inflight = new Set<string>();
+  /** Symbols whose profile came back empty this session — retry next session, not next tick. */
+  private profileEmpty = new Set<string>();
   private observer: IntersectionObserver | null = null;
   private elSymbol = new WeakMap<Element, string>();
   private subDebounce: ReturnType<typeof setTimeout> | null = null;
@@ -94,17 +96,26 @@ class QuoteEngine {
     const age = (s: string) => now - (quotes[s]?.ts ?? 0);
     const fresh = (s: string, ms: number) => quotes[s] && age(s) < ms;
     const busy = (s: string) => this.inflight.has(s);
+    // Empty persisted profiles count as missing (a failed run shouldn't stick
+    // forever), but only one retry per session via profileEmpty.
+    const needsProfile = (s: string) =>
+      (!profiles[s] || (!profiles[s].name && !profiles[s].logo)) &&
+      !this.profileEmpty.has(s) &&
+      !busy(s + ":p");
 
     for (const s of syms)
       if (this.visible.has(s) && !quotes[s] && !busy(s)) return { kind: "quote", symbol: s };
     for (const s of syms)
       if (this.visible.has(s) && !fresh(s, VISIBLE_STALE_MS) && !busy(s))
         return { kind: "quote", symbol: s };
+    // Visible profiles before off-screen quotes: with enough symbols the quote
+    // refresh cycle never drains, so low-priority profiles would starve forever.
+    for (const s of syms)
+      if (this.visible.has(s) && needsProfile(s)) return { kind: "profile", symbol: s };
     for (const s of syms) if (!quotes[s] && !busy(s)) return { kind: "quote", symbol: s };
     for (const s of syms)
       if (!fresh(s, HIDDEN_STALE_MS) && !busy(s)) return { kind: "quote", symbol: s };
-    for (const s of syms)
-      if (!profiles[s] && !busy(s + ":p")) return { kind: "profile", symbol: s };
+    for (const s of syms) if (needsProfile(s)) return { kind: "profile", symbol: s };
     return null;
   }
 
@@ -137,10 +148,14 @@ class QuoteEngine {
         const r = await fetch(`/api/profile?symbol=${encodeURIComponent(job.symbol)}`);
         if (r.ok) {
           const d = await r.json();
-          useQuotes.getState().setProfile(job.symbol, {
-            logo: d.logo || "",
-            name: d.name || "",
-          });
+          if (d.logo || d.name) {
+            useQuotes.getState().setProfile(job.symbol, {
+              logo: d.logo || "",
+              name: d.name || "",
+            });
+          } else {
+            this.profileEmpty.add(job.symbol);
+          }
         }
       }
     } catch {
