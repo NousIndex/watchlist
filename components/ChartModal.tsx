@@ -250,7 +250,11 @@ export function ChartModal({ symbol, onClose }: { symbol: string; onClose: () =>
             </button>
           ))}
         </div>
-        <div className="chart-box" ref={boxRef}>
+        <div className="chart-box">
+          {/* Dedicated host: lightweight-charts owns this div's children. React
+              must never render into the same container, or its reconciler can
+              sweep the chart's foreign DOM out (prod-only, on msg toggle). */}
+          <div className="chart-host" ref={boxRef} />
           {msg && <div className="chart-msg">{msg}</div>}
         </div>
         {name && <div className="c-name">{name}</div>}
