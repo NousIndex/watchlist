@@ -270,6 +270,21 @@ input {
   font-weight: 600;
   margin-top: 2px;
 }
+.row .ext {
+  font-size: 13px;
+  font-weight: 600;
+  margin-top: 2px;
+  white-space: nowrap;
+}
+.ext-ico {
+  font-size: 12px;
+}
+.ext-ico.pre {
+  color: #ff9f0a;
+}
+.ext-ico.post {
+  color: #6f9ef2;
+}
 .up {
   color: var(--up);
 }
@@ -470,6 +485,12 @@ input {
 }
 .chart-hdr .c-price {
   font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  margin-top: 2px;
+}
+.chart-hdr .c-period {
+  font-size: 13px;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
   margin-top: 2px;
 }

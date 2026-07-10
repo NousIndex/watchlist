@@ -89,7 +89,7 @@ export async function yahooGetJson(url: string): Promise<{ status: number; json:
 function yahooGetOnce(
   url: string,
   cookie: string | null = null
-): Promise<{ status: number; json: any | null }> {
+): Promise<{ status: number; json: any | null; text: string }> {
   const headers = cookie ? { ...YAHOO_HEADERS, Cookie: cookie } : YAHOO_HEADERS;
   return new Promise((resolve) => {
     const req = https.get(
@@ -99,15 +99,16 @@ function yahooGetOnce(
       const chunks: Buffer[] = [];
       res.on("data", (c) => chunks.push(c));
       res.on("end", () => {
+        const text = Buffer.concat(chunks).toString("utf8");
         let json: any | null = null;
         try {
-          json = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+          json = JSON.parse(text);
         } catch {}
-        resolve({ status: res.statusCode || 0, json });
+        resolve({ status: res.statusCode || 0, json, text });
       });
     });
     req.on("timeout", () => req.destroy(new Error("timeout")));
-    req.on("error", () => resolve({ status: 0, json: null }));
+    req.on("error", () => resolve({ status: 0, json: null, text: "" }));
   });
 }
 
@@ -157,4 +158,88 @@ export async function fetchYahooMeta(symbol: string): Promise<YahooMeta | null> 
     return meta;
   }
   return hit?.meta ?? null; // stale beats nothing when upstream throttles
+}
+
+/* ---------------- Crumb-authenticated v7 quote API ---------------- */
+
+// v7/finance/quote is the only free endpoint with pre/post-market fields
+// (v8 chart meta has none — verified). It needs a session cookie plus a
+// crumb fetched WITH that same cookie; a crumb from a different session 401s.
+let crumbPair: { cookie: string; crumb: string; at: number } | null = null;
+const CRUMB_TTL_MS = 60 * 60_000;
+
+function fetchHomepageCookies(): Promise<string | null> {
+  return new Promise((resolve) => {
+    const req = https.get(
+      "https://finance.yahoo.com/",
+      {
+        headers: { ...YAHOO_HEADERS, Accept: "text/html,application/xhtml+xml,*/*" },
+        agent: false,
+        timeout: 8_000,
+        ciphers: BROWSER_CIPHERS,
+        // Yahoo's homepage response headers blow past Node's 16 KB default.
+        maxHeaderSize: 256 * 1024,
+      },
+      (res) => {
+        res.resume();
+        const cookies = (res.headers["set-cookie"] || [])
+          .map((c) => c.split(";")[0])
+          .filter((c) => /^(A1|A3|A1S)=/.test(c));
+        resolve(cookies.length ? cookies.join("; ") : null);
+      }
+    );
+    req.on("timeout", () => req.destroy(new Error("timeout")));
+    req.on("error", () => resolve(null));
+  });
+}
+
+async function getCrumbPair(force = false): Promise<{ cookie: string; crumb: string } | null> {
+  if (!force && crumbPair && Date.now() - crumbPair.at < CRUMB_TTL_MS) return crumbPair;
+  // fc.yahoo.com's A1 as fallback — the homepage is occasionally consent-walled.
+  const cookie = (await fetchHomepageCookies()) ?? (await fetchA1Cookie());
+  if (!cookie) return null;
+  const { status, text } = await yahooGetOnce(
+    "https://query1.finance.yahoo.com/v1/test/getcrumb",
+    cookie
+  );
+  // The crumb is plain text; JSON bodies here are error envelopes.
+  if (status !== 200 || !text || text.includes("{")) return null;
+  crumbPair = { cookie, crumb: text.trim(), at: Date.now() };
+  return crumbPair;
+}
+
+export interface YahooV7Quote {
+  symbol: string;
+  marketState?: string; // PREPRE | PRE | REGULAR | POST | POSTPOST | CLOSED
+  preMarketPrice?: number;
+  preMarketChange?: number; // vs previous regular close
+  preMarketChangePercent?: number;
+  postMarketPrice?: number;
+  postMarketChange?: number; // vs regular close
+  postMarketChangePercent?: number;
+  regularMarketPrice?: number;
+  regularMarketPreviousClose?: number;
+}
+
+/** Batched v7 quotes (Yahoo-convention symbols). Null on upstream failure. */
+export async function fetchYahooV7Quotes(symbols: string[]): Promise<YahooV7Quote[] | null> {
+  if (symbols.length === 0) return [];
+  let pair = await getCrumbPair();
+  if (!pair) return null;
+  const url = (host: string) =>
+    `https://${host}.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(
+      symbols.join(",")
+    )}&crumb=${encodeURIComponent(pair!.crumb)}`;
+  let r = await yahooGetOnce(url("query1"), pair.cookie);
+  if (r.status === 401 || r.status === 403) {
+    // Expired/mismatched session — rebuild the cookie+crumb pair once.
+    pair = await getCrumbPair(true);
+    if (!pair) return null;
+    r = await yahooGetOnce(url("query1"), pair.cookie);
+  } else if (r.status === 429 || r.status === 0) {
+    await new Promise((res) => setTimeout(res, 900));
+    r = await yahooGetOnce(url("query2"), pair.cookie);
+  }
+  if (r.status !== 200) return null;
+  return r.json?.quoteResponse?.result ?? null;
 }

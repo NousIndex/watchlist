@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import type { Quote, Profile, Section, Tab } from "./types";
+import type { Quote, Profile, ExtQuote, Section, Tab } from "./types";
 
 export const uid = () => Math.random().toString(36).slice(2, 10);
 
@@ -381,10 +381,13 @@ export function tabsWithSymbol(tabs: Tab[], symbol: string): Set<string> {
 interface QuoteState {
   quotes: Record<string, Quote>;
   profiles: Record<string, Profile>;
+  ext: Record<string, ExtQuote>; // symbols currently in pre/post-market
   sgdRate: number | null; // USD -> SGD
   setQuote: (symbol: string, q: Quote) => void;
   setPrice: (symbol: string, price: number, ts: number) => void;
   setProfile: (symbol: string, p: Profile) => void;
+  /** Full replace: symbols that left pre/post-market drop off the map. */
+  setExt: (ext: Record<string, ExtQuote>) => void;
   setSgdRate: (r: number) => void;
 }
 
@@ -393,6 +396,7 @@ export const useQuotes = create<QuoteState>()(
     (set) => ({
       quotes: {},
       profiles: {},
+      ext: {},
       sgdRate: null,
       setQuote: (symbol, q) => set((s) => ({ quotes: { ...s.quotes, [symbol]: q } })),
       setPrice: (symbol, price, ts) =>
@@ -402,8 +406,15 @@ export const useQuotes = create<QuoteState>()(
           return { quotes: { ...s.quotes, [symbol]: { ...prev, price, ts } } };
         }),
       setProfile: (symbol, p) => set((s) => ({ profiles: { ...s.profiles, [symbol]: p } })),
+      setExt: (ext) => set({ ext }),
       setSgdRate: (r) => set({ sgdRate: r }),
     }),
-    { name: "sw-quotes" }
+    {
+      name: "sw-quotes",
+      // ext is session data: persisting it would resurrect a stale pre/post
+      // line on reload. The engine re-polls it right after start anyway.
+      partialize: (s) =>
+        ({ quotes: s.quotes, profiles: s.profiles, sgdRate: s.sgdRate }) as any,
+    }
   )
 );

@@ -8,6 +8,16 @@ import { Avatar } from "./Avatar";
 
 const RANGES = ["1D", "1W", "1M", "6M", "1Y", "5Y"] as const;
 
+// TradingView-style period P&L label ("+4.38 +10.60% past month"). 1D is
+// excluded — the header already shows the daily change.
+const PERIOD_LABEL: Record<string, string> = {
+  "1W": "past week",
+  "1M": "past month",
+  "6M": "past 6 months",
+  "1Y": "past year",
+  "5Y": "past 5 years",
+};
+
 const BN_RANGES: Record<string, { interval: string; limit: number; intraday: boolean }> = {
   "1D": { interval: "5m", limit: 288, intraday: true },
   "1W": { interval: "30m", limit: 336, intraday: true },
@@ -133,11 +143,14 @@ export function ChartModal({ symbol, onClose }: { symbol: string; onClose: () =>
   const [range, setRange] = useState<(typeof RANGES)[number]>("1D");
   const [msg, setMsg] = useState("Loading…");
   const [stats, setStats] = useState<Stats | null>(null);
+  // First/last candle of the loaded range, for the period P&L line.
+  const [period, setPeriod] = useState<{ base: number; last: number } | null>(null);
   const [showLists, setShowLists] = useState(false);
   const boxRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
 
   const quote = useQuotes((s) => s.quotes[symbol]);
+  const ext = useQuotes((s) => s.ext[symbol]);
   const profile = useQuotes((s) => s.profiles[symbol]);
   const currency = useWatchlist((s) => s.currency);
   const sgdRate = useQuotes((s) => s.sgdRate);
@@ -181,6 +194,7 @@ export function ChartModal({ symbol, onClose }: { symbol: string; onClose: () =>
 
     let cancelled = false;
     setMsg("Loading…");
+    setPeriod(null);
     fetchCandles(symbol, range)
       .then((d: any) => {
         if (cancelled) return;
@@ -190,6 +204,10 @@ export function ChartModal({ symbol, onClose }: { symbol: string; onClose: () =>
         }
         series.setData(d.candles);
         chart.timeScale().fitContent();
+        setPeriod({
+          base: d.candles[0].open,
+          last: d.candles[d.candles.length - 1].close,
+        });
         setMsg("");
       })
       .catch(() => !cancelled && setMsg("Failed to load chart"));
@@ -208,9 +226,20 @@ export function ChartModal({ symbol, onClose }: { symbol: string; onClose: () =>
   }, [symbol, range]);
 
   const hasData = quote && isFinite(quote.price);
-  const chg = hasData ? (quote.price - quote.prevClose) * rate : NaN;
-  const pct = hasData && quote.prevClose ? ((quote.price - quote.prevClose) / quote.prevClose) * 100 : NaN;
+  // During pre/post-market the live tick includes extended trades; pin the
+  // main line to the regular session close like TradingView.
+  const live = ext ? ext.regPrice : hasData ? quote.price : NaN;
+  const prev = ext ? ext.regPrevClose : hasData ? quote.prevClose : NaN;
+  const chg = isFinite(live) ? (live - prev) * rate : NaN;
+  const pct = isFinite(live) && prev ? ((live - prev) / prev) * 100 : NaN;
   const dir = !isFinite(chg) || chg === 0 ? "muted" : chg > 0 ? "up" : "down";
+  const extDir = !ext || ext.chg === 0 ? "muted" : ext.chg > 0 ? "up" : "down";
+
+  // Period P&L: live price (falling back to the last candle) vs period start.
+  const pLive = isFinite(live) ? live : period ? period.last : NaN;
+  const pChg = period && period.base ? (pLive - period.base) * rate : NaN;
+  const pPct = period && period.base ? ((pLive - period.base) / period.base) * 100 : NaN;
+  const pDir = !isFinite(pChg) || pChg === 0 ? "muted" : pChg > 0 ? "up" : "down";
   const crypto = isCrypto(symbol);
   const name = stats?.name || profile?.name || "";
 
@@ -225,12 +254,24 @@ export function ChartModal({ symbol, onClose }: { symbol: string; onClose: () =>
               {stats?.exchange ? <span className="c-exch"> · {stats.exchange}</span> : null}
             </div>
             <div className="c-price">
-              {hasData ? fmtPrice(quote.price * rate) : "—"}{" "}
+              {isFinite(live) ? fmtPrice(live * rate) : "—"}{" "}
               <span className={dir}>
                 {isFinite(chg) ? `${fmtChange(chg)} ${fmtPct(pct)}` : ""}
               </span>
+              {ext && <span className="muted"> at close</span>}
               <span className="muted"> · {currency}</span>
             </div>
+            {ext && (
+              <div className={`c-period ${extDir}`}>
+                <span className={`ext-ico ${ext.state}`}>{ext.state === "pre" ? "☀" : "☾"}</span>{" "}
+                {fmtPrice(ext.price * rate)} {fmtChange(ext.chg * rate)} {fmtPct(ext.pct)}
+              </div>
+            )}
+            {range !== "1D" && isFinite(pChg) && (
+              <div className={`c-period ${pDir}`}>
+                {fmtChange(pChg)} {fmtPct(pPct)} {PERIOD_LABEL[range]}
+              </div>
+            )}
           </div>
         </div>
         <div className="chart-hdr-actions">

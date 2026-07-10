@@ -1,6 +1,6 @@
 "use client";
 import { useQuotes, useWatchlist, allSymbols } from "./store";
-import { isCrypto, cryptoPair, CRYPTO_PREFIX } from "./crypto";
+import { isCrypto, isYahooCrypto, cryptoPair, CRYPTO_PREFIX } from "./crypto";
 
 /**
  * QuoteEngine
@@ -21,6 +21,7 @@ const VISIBLE_STALE_MS = 15_000;
 const HIDDEN_STALE_MS = 90_000;
 const MAX_WS_SUBS = 45;
 const CRYPTO_POLL_MS = 10_000;
+const EXT_POLL_MS = 60_000; // pre/post-market snapshot (server caches 45s)
 
 class QuoteEngine {
   private started = false;
@@ -63,7 +64,9 @@ class QuoteEngine {
 
     setInterval(() => this.tick(), TICK_MS);
     setInterval(() => this.pollCrypto(), CRYPTO_POLL_MS);
+    setInterval(() => this.pollExtended(), EXT_POLL_MS);
     this.pollCrypto();
+    this.pollExtended();
     this.connectFinnhub();
     this.connectBinance();
     this.fetchFx();
@@ -72,6 +75,7 @@ class QuoteEngine {
       if (!document.hidden) {
         this.tick();
         this.pollCrypto();
+        this.pollExtended();
       }
     });
   }
@@ -193,6 +197,23 @@ class QuoteEngine {
           });
         }
       }
+    } catch {}
+  }
+
+  /* --------- Extended hours (pre/post-market) — one batched call --------- */
+
+  private async pollExtended() {
+    if (document.hidden) return;
+    // Crypto trades 24/7 — no extended sessions to report.
+    const syms = allSymbols(useWatchlist.getState().tabs).filter(
+      (s) => !isCrypto(s) && !isYahooCrypto(s)
+    );
+    if (syms.length === 0) return;
+    try {
+      const r = await fetch(`/api/extended?symbols=${encodeURIComponent(syms.join(","))}`);
+      if (!r.ok) return;
+      const d = await r.json();
+      if (d && typeof d.ext === "object" && d.ext) useQuotes.getState().setExt(d.ext);
     } catch {}
   }
 
