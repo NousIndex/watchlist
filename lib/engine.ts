@@ -1,14 +1,19 @@
 "use client";
 import { useQuotes, useWatchlist, allSymbols } from "./store";
-import { isCrypto, isYahooCrypto, cryptoPair, CRYPTO_PREFIX } from "./crypto";
+import { isCrypto, isYahooOnly, cryptoPair, CRYPTO_PREFIX } from "./crypto";
 
 /**
  * QuoteEngine
  *
- * Stocks/ETFs (Finnhub):
- * - One rate-limited REST queue (~46/min, under the 60/min free cap; search
- *   shares the budget). Priority: visible & unloaded > visible & stale >
- *   visible missing profile > unloaded > off-screen stale > missing profiles.
+ * Stocks/ETFs:
+ * - Bootstrap: the extended-hours poll (one batched Yahoo call, on start and
+ *   every 30s) carries regular prices + names, filling every row at once.
+ *   Non-US listings, indices, futures and FX (isYahooOnly) live entirely on
+ *   this poll — Finnhub's free tier can't quote them.
+ * - Finnhub rate-limited REST queue (~46/min, under the 60/min free cap;
+ *   search shares the budget) keeps US quotes fresh. Priority: visible &
+ *   unloaded > visible & stale > visible missing profile > unloaded >
+ *   off-screen stale > missing profiles.
  * - Websocket streams trades for visible rows (free cap: 50 subs).
  *
  * Crypto (Binance public API, no key, browser-direct):
@@ -21,7 +26,9 @@ const VISIBLE_STALE_MS = 15_000;
 const HIDDEN_STALE_MS = 90_000;
 const MAX_WS_SUBS = 45;
 const CRYPTO_POLL_MS = 10_000;
-const EXT_POLL_MS = 60_000; // pre/post-market snapshot (server caches 45s)
+const EXT_POLL_MS = 30_000; // batched Yahoo snapshot (server caches 25s)
+const BATCH_FRESH_MS = 25_000; // batch bootstrap won't overwrite quotes newer than this
+const FX_POLL_MS = 3_600_000; // USD->SGD drifts slowly; hourly is plenty
 
 class QuoteEngine {
   private started = false;
@@ -65,6 +72,7 @@ class QuoteEngine {
     setInterval(() => this.tick(), TICK_MS);
     setInterval(() => this.pollCrypto(), CRYPTO_POLL_MS);
     setInterval(() => this.pollExtended(), EXT_POLL_MS);
+    setInterval(() => this.fetchFx(), FX_POLL_MS);
     this.pollCrypto();
     this.pollExtended();
     this.connectFinnhub();
@@ -76,6 +84,7 @@ class QuoteEngine {
         this.tick();
         this.pollCrypto();
         this.pollExtended();
+        this.fetchFx(); // cheap: server caches the upstream an hour
       }
     });
   }
@@ -95,7 +104,11 @@ class QuoteEngine {
 
   private pickNext(): { kind: "quote" | "profile"; symbol: string } | null {
     const { quotes, profiles } = useQuotes.getState();
-    const syms = allSymbols(useWatchlist.getState().tabs).filter((s) => !isCrypto(s));
+    // Yahoo-only symbols are excluded: Finnhub would just miss and the queue
+    // slot is wasted — the batched poll owns them (quote + name).
+    const syms = allSymbols(useWatchlist.getState().tabs).filter(
+      (s) => !isCrypto(s) && !isYahooOnly(s)
+    );
     const now = Date.now();
     const age = (s: string) => now - (quotes[s]?.ts ?? 0);
     const fresh = (s: string, ms: number) => quotes[s] && age(s) < ms;
@@ -200,20 +213,37 @@ class QuoteEngine {
     } catch {}
   }
 
-  /* --------- Extended hours (pre/post-market) — one batched call --------- */
+  /* --------- Extended hours + batched bootstrap — one Yahoo call --------- */
 
   private async pollExtended() {
     if (document.hidden) return;
-    // Crypto trades 24/7 — no extended sessions to report.
-    const syms = allSymbols(useWatchlist.getState().tabs).filter(
-      (s) => !isCrypto(s) && !isYahooCrypto(s)
-    );
+    // Binance crypto has its own batched poll; Yahoo-sourced crypto (AKT-USD)
+    // rides along here for the regular-price bootstrap (it never has ext data).
+    const syms = allSymbols(useWatchlist.getState().tabs).filter((s) => !isCrypto(s));
     if (syms.length === 0) return;
     try {
       const r = await fetch(`/api/extended?symbols=${encodeURIComponent(syms.join(","))}`);
       if (!r.ok) return;
       const d = await r.json();
-      if (d && typeof d.ext === "object" && d.ext) useQuotes.getState().setExt(d.ext);
+      const st = useQuotes.getState();
+      if (d && typeof d.ext === "object" && d.ext) st.setExt(d.ext);
+      // Batched regular prices: fills every row in one round trip on load,
+      // then tops up whatever the Finnhub queue hasn't reached. Skip anything
+      // updated recently — a live websocket tick beats Yahoo's snapshot.
+      if (d && typeof d.reg === "object" && d.reg) {
+        const now = Date.now();
+        const batch: Record<string, { price: number; prevClose: number; ts: number }> = {};
+        const names: Record<string, string> = {};
+        for (const [sym, q] of Object.entries<any>(d.reg)) {
+          if (typeof q.n === "string" && q.n && q.n !== st.names[sym]) names[sym] = q.n;
+          const cur = st.quotes[sym];
+          if (cur && now - cur.ts < BATCH_FRESH_MS) continue;
+          if (typeof q.c === "number" && q.c > 0)
+            batch[sym] = { price: q.c, prevClose: q.pc || q.c, ts: now };
+        }
+        if (Object.keys(batch).length) st.setQuotes(batch);
+        if (Object.keys(names).length) st.setNames(names);
+      }
     } catch {}
   }
 

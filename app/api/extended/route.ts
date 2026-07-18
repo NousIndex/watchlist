@@ -7,7 +7,7 @@ export const runtime = "nodejs"; // lib/yahoo.ts uses node:https
 
 // One batched Yahoo call covers every symbol; a short in-memory cache absorbs
 // the engine's polling across clients (same pattern as /api/candles).
-const CACHE_MS = 45_000;
+const CACHE_MS = 25_000;
 let cache: { at: number; key: string; body: any } | null = null;
 
 export async function GET(req: Request) {
@@ -36,18 +36,24 @@ export async function GET(req: Request) {
   // Only symbols currently in an extended session carry the fields; everything
   // else (regular hours, closed, indices, FX) is simply absent from the map.
   const ext: Record<string, ExtQuote> = {};
+  // Regular-session price (and name, when Yahoo has one) for every symbol —
+  // the client uses this as a batched bootstrap so first paint doesn't wait
+  // on the per-symbol Finnhub queue.
+  const reg: Record<string, { c: number; pc: number; n?: string }> = {};
   for (const q of quotes) {
     const sym = toOriginal.get(q.symbol);
     if (!sym) continue;
     if (q.regularMarketPrice == null || q.regularMarketPreviousClose == null) continue;
-    const reg = { regPrice: q.regularMarketPrice, regPrevClose: q.regularMarketPreviousClose };
+    const n = q.longName || q.shortName;
+    reg[sym] = { c: q.regularMarketPrice, pc: q.regularMarketPreviousClose, ...(n ? { n } : {}) };
+    const regFields = { regPrice: q.regularMarketPrice, regPrevClose: q.regularMarketPreviousClose };
     if (q.marketState === "PRE" && q.preMarketPrice != null && q.preMarketChange != null) {
       ext[sym] = {
         state: "pre",
         price: q.preMarketPrice,
         chg: q.preMarketChange,
         pct: q.preMarketChangePercent ?? 0,
-        ...reg,
+        ...regFields,
       };
     } else if (
       // PREPRE = overnight after post-market; TradingView keeps showing the
@@ -61,14 +67,14 @@ export async function GET(req: Request) {
         price: q.postMarketPrice,
         chg: q.postMarketChange,
         pct: q.postMarketChangePercent ?? 0,
-        ...reg,
+        ...regFields,
       };
     }
   }
 
-  const body = { ext };
+  const body = { ext, reg };
   cache = { at: Date.now(), key, body };
   return NextResponse.json(body, {
-    headers: { "Cache-Control": "public, s-maxage=45, stale-while-revalidate=120" },
+    headers: { "Cache-Control": "public, s-maxage=25, stale-while-revalidate=120" },
   });
 }

@@ -381,11 +381,18 @@ export function tabsWithSymbol(tabs: Tab[], symbol: string): Set<string> {
 interface QuoteState {
   quotes: Record<string, Quote>;
   profiles: Record<string, Profile>;
+  /** Batch-sourced display names (session only). A fallback for rows whose
+   * profile hasn't been fetched yet — kept out of profiles so the engine's
+   * profile queue still fetches the full profile (logo) for them. */
+  names: Record<string, string>;
   ext: Record<string, ExtQuote>; // symbols currently in pre/post-market
   sgdRate: number | null; // USD -> SGD
   setQuote: (symbol: string, q: Quote) => void;
+  /** Bulk merge — one store update for a whole batch of quotes. */
+  setQuotes: (entries: Record<string, Quote>) => void;
   setPrice: (symbol: string, price: number, ts: number) => void;
   setProfile: (symbol: string, p: Profile) => void;
+  setNames: (entries: Record<string, string>) => void;
   /** Full replace: symbols that left pre/post-market drop off the map. */
   setExt: (ext: Record<string, ExtQuote>) => void;
   setSgdRate: (r: number) => void;
@@ -396,9 +403,11 @@ export const useQuotes = create<QuoteState>()(
     (set) => ({
       quotes: {},
       profiles: {},
+      names: {},
       ext: {},
       sgdRate: null,
       setQuote: (symbol, q) => set((s) => ({ quotes: { ...s.quotes, [symbol]: q } })),
+      setQuotes: (entries) => set((s) => ({ quotes: { ...s.quotes, ...entries } })),
       setPrice: (symbol, price, ts) =>
         set((s) => {
           const prev = s.quotes[symbol];
@@ -406,6 +415,7 @@ export const useQuotes = create<QuoteState>()(
           return { quotes: { ...s.quotes, [symbol]: { ...prev, price, ts } } };
         }),
       setProfile: (symbol, p) => set((s) => ({ profiles: { ...s.profiles, [symbol]: p } })),
+      setNames: (entries) => set((s) => ({ names: { ...s.names, ...entries } })),
       setExt: (ext) => set({ ext }),
       setSgdRate: (r) => set({ sgdRate: r }),
     }),

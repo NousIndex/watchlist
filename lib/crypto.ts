@@ -35,6 +35,17 @@ const SPECIAL_NAMES: Record<string, string> = {
 /** Yahoo-sourced crypto pairs (coins not listed on Binance), e.g. "AKT-USD". */
 export const isYahooCrypto = (symbol: string) => /^[A-Z0-9]+-USD$/.test(symbol);
 
+/**
+ * Non-US listings, indices, futures, FX, and Yahoo-sourced crypto — nothing
+ * Finnhub's free tier can quote. These live entirely on the batched Yahoo
+ * poll; the per-symbol Finnhub queue skips them instead of burning a
+ * rate-limited slot on a guaranteed miss.
+ */
+const NON_US_SUFFIX =
+  /\.(L|SI|HK|T|KS|KQ|TW|TWO|AX|NZ|PA|AS|BR|MC|MI|DE|F|BE|SW|VI|ST|OL|CO|HE|IR|LS|TO|V|NS|BO|SS|SZ|SA|MX|JO)$/;
+export const isYahooOnly = (symbol: string) =>
+  /[\^=]/.test(symbol) || isYahooCrypto(symbol) || NON_US_SUFFIX.test(symbol);
+
 export const displaySymbol = (symbol: string) =>
   isCrypto(symbol)
     ? cryptoPair(symbol)

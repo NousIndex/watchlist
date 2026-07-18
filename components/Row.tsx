@@ -19,6 +19,7 @@ function RowInner({ symbol, editMode, onOpen, onRemove }: Props) {
   const quote = useQuotes((s) => s.quotes[symbol]);
   const ext = useQuotes((s) => s.ext[symbol]);
   const profile = useQuotes((s) => s.profiles[symbol]);
+  const batchName = useQuotes((s) => s.names[symbol]);
   const currency = useWatchlist((s) => s.currency);
   const sgdRate = useQuotes((s) => s.sgdRate);
 
@@ -99,7 +100,7 @@ function RowInner({ symbol, editMode, onOpen, onRemove }: Props) {
       <div className="mid">
         <div className="sym">{displaySymbol(symbol)}</div>
         <div className="name">
-          {isCrypto(symbol) ? "Binance · 24h" : isYahooCrypto(symbol) ? "Crypto · Yahoo" : profile?.name ||"\u00a0"}
+          {isCrypto(symbol) ? "Binance · 24h" : isYahooCrypto(symbol) ? "Crypto · Yahoo" : profile?.name || batchName || "\u00a0"}
         </div>
       </div>
       <div className="right">

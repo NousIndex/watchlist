@@ -219,6 +219,8 @@ export interface YahooV7Quote {
   postMarketChangePercent?: number;
   regularMarketPrice?: number;
   regularMarketPreviousClose?: number;
+  longName?: string;
+  shortName?: string;
 }
 
 /** Batched v7 quotes (Yahoo-convention symbols). Null on upstream failure. */
