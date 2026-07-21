@@ -386,16 +386,20 @@ interface QuoteState {
    * profile queue still fetches the full profile (logo) for them. */
   names: Record<string, string>;
   ext: Record<string, ExtQuote>; // symbols currently in pre/post-market
-  sgdRate: number | null; // USD -> SGD
+  /** Listing currency + instrument type per symbol, for display conversion. */
+  meta: Record<string, { cc?: string; qt?: string }>;
+  /** 1 USD = n units. Null until /api/fx lands. */
+  fxRates: Record<string, number> | null;
   setQuote: (symbol: string, q: Quote) => void;
   /** Bulk merge — one store update for a whole batch of quotes. */
   setQuotes: (entries: Record<string, Quote>) => void;
   setPrice: (symbol: string, price: number, ts: number) => void;
   setProfile: (symbol: string, p: Profile) => void;
   setNames: (entries: Record<string, string>) => void;
+  setMeta: (entries: Record<string, { cc?: string; qt?: string }>) => void;
   /** Full replace: symbols that left pre/post-market drop off the map. */
   setExt: (ext: Record<string, ExtQuote>) => void;
-  setSgdRate: (r: number) => void;
+  setFxRates: (r: Record<string, number>) => void;
 }
 
 export const useQuotes = create<QuoteState>()(
@@ -405,7 +409,8 @@ export const useQuotes = create<QuoteState>()(
       profiles: {},
       names: {},
       ext: {},
-      sgdRate: null,
+      meta: {},
+      fxRates: null,
       setQuote: (symbol, q) => set((s) => ({ quotes: { ...s.quotes, [symbol]: q } })),
       setQuotes: (entries) => set((s) => ({ quotes: { ...s.quotes, ...entries } })),
       setPrice: (symbol, price, ts) =>
@@ -416,15 +421,21 @@ export const useQuotes = create<QuoteState>()(
         }),
       setProfile: (symbol, p) => set((s) => ({ profiles: { ...s.profiles, [symbol]: p } })),
       setNames: (entries) => set((s) => ({ names: { ...s.names, ...entries } })),
+      setMeta: (entries) => set((s) => ({ meta: { ...s.meta, ...entries } })),
       setExt: (ext) => set({ ext }),
-      setSgdRate: (r) => set({ sgdRate: r }),
+      setFxRates: (r) => set({ fxRates: r }),
     }),
     {
       name: "sw-quotes",
       // ext is session data: persisting it would resurrect a stale pre/post
       // line on reload. The engine re-polls it right after start anyway.
       partialize: (s) =>
-        ({ quotes: s.quotes, profiles: s.profiles, sgdRate: s.sgdRate }) as any,
+        ({
+          quotes: s.quotes,
+          profiles: s.profiles,
+          meta: s.meta, // currencies are stable; persisting avoids a flash of USD
+          fxRates: s.fxRates,
+        }) as any,
     }
   )
 );

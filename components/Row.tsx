@@ -6,6 +6,7 @@ import { useQuotes, useWatchlist } from "@/lib/store";
 import { engine } from "@/lib/engine";
 import { fmtPrice, fmtChange, fmtPct } from "@/lib/format";
 import { isCrypto, isYahooCrypto, displaySymbol } from "@/lib/crypto";
+import { convertTo } from "@/lib/fx";
 import { Avatar } from "./Avatar";
 
 interface Props {
@@ -21,7 +22,8 @@ function RowInner({ symbol, editMode, onOpen, onRemove }: Props) {
   const profile = useQuotes((s) => s.profiles[symbol]);
   const batchName = useQuotes((s) => s.names[symbol]);
   const currency = useWatchlist((s) => s.currency);
-  const sgdRate = useQuotes((s) => s.sgdRate);
+  const fxRates = useQuotes((s) => s.fxRates);
+  const meta = useQuotes((s) => s.meta[symbol]);
 
   const ref = useRef<HTMLDivElement | null>(null);
   const prevPrice = useRef<number | null>(null);
@@ -58,7 +60,8 @@ function RowInner({ symbol, editMode, onOpen, onRemove }: Props) {
     prevPrice.current = quote.price;
   }, [quote, ext]);
 
-  const rate = currency === "SGD" && sgdRate ? sgdRate : 1;
+  // Convert from the listing's own currency, not by assuming everything is USD.
+  const rate = convertTo(meta?.cc, currency, fxRates, meta?.qt).factor;
   const hasData = quote && isFinite(quote.price);
   // During pre/post-market the live tick includes extended trades; pin the
   // main line to the regular session close like TradingView.

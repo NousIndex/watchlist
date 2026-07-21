@@ -221,6 +221,88 @@ export interface YahooV7Quote {
   regularMarketPreviousClose?: number;
   longName?: string;
   shortName?: string;
+  /** Listing currency — "SGD", "KRW", "GBp" (pence), … */
+  currency?: string;
+  /** EQUITY | ETF | INDEX | CURRENCY | FUTURE | CRYPTOCURRENCY */
+  quoteType?: string;
+}
+
+/**
+ * quoteSummary: company profile, calendar events, analyst coverage, fund
+ * holdings. Same crumb auth as v7. Yahoo returns only the modules that apply
+ * to the instrument — an ETF has no `calendarEvents`, an index has almost
+ * nothing — so every caller must treat each module as optional.
+ */
+export async function fetchYahooSummary(
+  symbol: string,
+  modules: string[]
+): Promise<any | null> {
+  let pair = await getCrumbPair();
+  if (!pair) return null;
+  const url = (host: string) =>
+    `https://${host}.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(
+      toYahooSymbol(symbol)
+    )}?modules=${encodeURIComponent(modules.join(","))}&crumb=${encodeURIComponent(pair!.crumb)}`;
+  let r = await yahooGetOnce(url("query1"), pair.cookie);
+  if (r.status === 401 || r.status === 403) {
+    pair = await getCrumbPair(true);
+    if (!pair) return null;
+    r = await yahooGetOnce(url("query1"), pair.cookie);
+  } else if (r.status === 429 || r.status === 0) {
+    await new Promise((res) => setTimeout(res, 900));
+    r = await yahooGetOnce(url("query2"), pair.cookie);
+  }
+  if (r.status !== 200) return null;
+  return r.json?.quoteSummary?.result?.[0] ?? null;
+}
+
+/**
+ * Fundamentals timeseries — the current source for financial statements.
+ * The legacy quoteSummary statement modules (balanceSheetHistory,
+ * cashflowStatementHistory) still return 200 but their line items are gone:
+ * the objects come back holding only `endDate`/`maxAge`. Verified against
+ * GOOG. This endpoint has the real numbers.
+ *
+ * Returns { [typeWithoutPrefix]: [{ date, value }] }, oldest first.
+ */
+export async function fetchYahooTimeseries(
+  symbol: string,
+  types: string[]
+): Promise<Record<string, { date: string; value: number }[]> | null> {
+  let pair = await getCrumbPair();
+  if (!pair) return null;
+  const now = Math.floor(Date.now() / 1000);
+  const start = now - 6 * 365 * 24 * 3600;
+  const sym = toYahooSymbol(symbol);
+  const url = (host: string) =>
+    `https://${host}.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/${encodeURIComponent(
+      sym
+    )}?symbol=${encodeURIComponent(sym)}&type=${encodeURIComponent(
+      types.join(",")
+    )}&period1=${start}&period2=${now}&crumb=${encodeURIComponent(pair!.crumb)}`;
+
+  let r = await yahooGetOnce(url("query1"), pair.cookie);
+  if (r.status === 401 || r.status === 403) {
+    pair = await getCrumbPair(true);
+    if (!pair) return null;
+    r = await yahooGetOnce(url("query1"), pair.cookie);
+  } else if (r.status === 429 || r.status === 0) {
+    await new Promise((res) => setTimeout(res, 900));
+    r = await yahooGetOnce(url("query2"), pair.cookie);
+  }
+  if (r.status !== 200) return null;
+
+  const out: Record<string, { date: string; value: number }[]> = {};
+  for (const row of r.json?.timeseries?.result ?? []) {
+    // Each row carries one type key alongside `meta`/`timestamp`.
+    const key = Object.keys(row).find((k) => k !== "meta" && k !== "timestamp");
+    if (!key) continue;
+    const points = (row[key] ?? [])
+      .filter((p: any) => p && p.asOfDate && typeof p.reportedValue?.raw === "number")
+      .map((p: any) => ({ date: p.asOfDate as string, value: p.reportedValue.raw as number }));
+    if (points.length) out[key.replace(/^(annual|quarterly)/, "")] = points;
+  }
+  return out;
 }
 
 /** Batched v7 quotes (Yahoo-convention symbols). Null on upstream failure. */

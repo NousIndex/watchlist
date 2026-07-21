@@ -234,8 +234,12 @@ class QuoteEngine {
         const now = Date.now();
         const batch: Record<string, { price: number; prevClose: number; ts: number }> = {};
         const names: Record<string, string> = {};
+        const meta: Record<string, { cc?: string; qt?: string }> = {};
         for (const [sym, q] of Object.entries<any>(d.reg)) {
           if (typeof q.n === "string" && q.n && q.n !== st.names[sym]) names[sym] = q.n;
+          const prev = st.meta[sym];
+          if ((q.cc || q.qt) && (prev?.cc !== q.cc || prev?.qt !== q.qt))
+            meta[sym] = { cc: q.cc, qt: q.qt };
           const cur = st.quotes[sym];
           if (cur && now - cur.ts < BATCH_FRESH_MS) continue;
           if (typeof q.c === "number" && q.c > 0)
@@ -243,6 +247,7 @@ class QuoteEngine {
         }
         if (Object.keys(batch).length) st.setQuotes(batch);
         if (Object.keys(names).length) st.setNames(names);
+        if (Object.keys(meta).length) st.setMeta(meta);
       }
     } catch {}
   }
@@ -252,7 +257,7 @@ class QuoteEngine {
       const r = await fetch("/api/fx");
       if (r.ok) {
         const d = await r.json();
-        if (d.rate) useQuotes.getState().setSgdRate(d.rate);
+        if (d.rates && typeof d.rates === "object") useQuotes.getState().setFxRates(d.rates);
       }
     } catch {}
   }

@@ -4,7 +4,14 @@ import { createChart, ColorType, type IChartApi } from "lightweight-charts";
 import { useQuotes, useWatchlist, tabsWithSymbol } from "@/lib/store";
 import { fmtPrice, fmtChange, fmtPct, fmtBig } from "@/lib/format";
 import { isCrypto, cryptoPair, cryptoBase, displaySymbol } from "@/lib/crypto";
+import { convertTo } from "@/lib/fx";
 import { Avatar } from "./Avatar";
+import { TickerOverview } from "./TickerOverview";
+import { FinancialsTab } from "./Financials";
+import { NewsTab } from "./News";
+
+const TABS = ["Overview", "Financials", "News"] as const;
+type TabKey = (typeof TABS)[number];
 
 const RANGES = ["1D", "1W", "1M", "6M", "1Y", "5Y"] as const;
 
@@ -146,6 +153,7 @@ export function ChartModal({ symbol, onClose }: { symbol: string; onClose: () =>
   // First/last candle of the loaded range, for the period P&L line.
   const [period, setPeriod] = useState<{ base: number; last: number } | null>(null);
   const [showLists, setShowLists] = useState(false);
+  const [tab, setTab] = useState<TabKey>("Overview");
   const boxRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
 
@@ -153,8 +161,11 @@ export function ChartModal({ symbol, onClose }: { symbol: string; onClose: () =>
   const ext = useQuotes((s) => s.ext[symbol]);
   const profile = useQuotes((s) => s.profiles[symbol]);
   const currency = useWatchlist((s) => s.currency);
-  const sgdRate = useQuotes((s) => s.sgdRate);
-  const rate = currency === "SGD" && sgdRate ? sgdRate : 1;
+  const fxRates = useQuotes((s) => s.fxRates);
+  const meta = useQuotes((s) => s.meta[symbol]);
+  // Native listing currency -> display currency. `shownCcy` is null for index
+  // levels and FX rates, which aren't money and get no currency label.
+  const { factor: rate, ccy: shownCcy } = convertTo(meta?.cc, currency, fxRates, meta?.qt);
 
   useEffect(() => {
     let cancelled = false;
@@ -259,7 +270,7 @@ export function ChartModal({ symbol, onClose }: { symbol: string; onClose: () =>
                 {isFinite(chg) ? `${fmtChange(chg)} ${fmtPct(pct)}` : ""}
               </span>
               {ext && <span className="muted"> at close</span>}
-              <span className="muted"> · {currency}</span>
+              {shownCcy && <span className="muted"> · {shownCcy}</span>}
             </div>
             {ext && (
               <div className={`c-period ${extDir}`}>
@@ -299,8 +310,36 @@ export function ChartModal({ symbol, onClose }: { symbol: string; onClose: () =>
           {msg && <div className="chart-msg">{msg}</div>}
         </div>
         {name && <div className="c-name">{name}</div>}
+        {/* Binance pairs have no issuer behind them — no statements, no news. */}
+        {!crypto && (
+          <div className="dtabs" role="tablist">
+            {TABS.map((t) => (
+              <button
+                key={t}
+                role="tab"
+                aria-selected={tab === t}
+                className={tab === t ? "on" : ""}
+                onClick={() => setTab(t)}
+              >
+                {t}
+              </button>
+            ))}
+          </div>
+        )}
+        {!crypto && tab === "Overview" && (
+          <TickerOverview
+            symbol={symbol}
+            rate={rate}
+            currency={shownCcy ?? currency}
+            live={live}
+          />
+        )}
+        {!crypto && tab === "Financials" && <FinancialsTab symbol={symbol} />}
+        {!crypto && tab === "News" && <NewsTab symbol={symbol} name={name} />}
+        {(crypto || tab === "Overview") && (
         <div className="stats">
           <h2>Key stats</h2>
+          <div className="stat-list">
           {stats ? (
             crypto ? (
               <>
@@ -321,19 +360,21 @@ export function ChartModal({ symbol, onClose }: { symbol: string; onClose: () =>
                       : "—"
                   }
                 />
+                {/* Price rows carry the same conversion as the header so they
+                    stay comparable with it. */}
                 <StatRow label="Day range" value={
                   stats.dayLow != null && stats.dayHigh != null
-                    ? `${fmtPrice(stats.dayLow)} – ${fmtPrice(stats.dayHigh)}`
+                    ? `${fmtPrice(stats.dayLow * rate)} – ${fmtPrice(stats.dayHigh * rate)}`
                     : "—"
                 } />
                 <StatRow label="52W range" value={
                   stats.low52 != null && stats.high52 != null
-                    ? `${fmtPrice(stats.low52)} – ${fmtPrice(stats.high52)}`
+                    ? `${fmtPrice(stats.low52 * rate)} – ${fmtPrice(stats.high52 * rate)}`
                     : "—"
                 } />
                 <StatRow label="Beta (1Y)" value={stats.beta != null ? stats.beta.toFixed(3) : "—"} />
                 <StatRow label="P/E (TTM)" value={stats.peTTM != null ? stats.peTTM.toFixed(2) : "—"} />
-                <StatRow label="EPS (TTM)" value={stats.epsTTM != null ? fmtPrice(stats.epsTTM) : "—"} />
+                <StatRow label="EPS (TTM)" value={stats.epsTTM != null ? fmtPrice(stats.epsTTM * rate) : "—"} />
                 <StatRow
                   label="Dividend yield"
                   value={stats.dividendYield != null ? stats.dividendYield.toFixed(2) + "%" : "—"}
@@ -346,10 +387,15 @@ export function ChartModal({ symbol, onClose }: { symbol: string; onClose: () =>
               <span />
             </div>
           )}
+          </div>
         </div>
-        <div className="empty-hint" style={{ padding: "8px 20px 24px" }}>
-          {crypto ? "Binance · 24h change basis" : "Chart in native currency · Yahoo Finance"}
-        </div>
+        )}
+        {/* The Financials and News tabs carry their own source line. */}
+        {(crypto || tab === "Overview") && (
+          <div className="empty-hint" style={{ padding: "8px 20px 24px" }}>
+            {crypto ? "Binance · 24h change basis" : "Chart in native currency · Yahoo Finance"}
+          </div>
+        )}
       </div>
       {showLists && <ListsSheet symbol={symbol} onClose={() => setShowLists(false)} />}
     </div>

@@ -8,6 +8,9 @@ export const runtime = "nodejs"; // lib/yahoo.ts uses node:https
 // One batched Yahoo call covers every symbol; a short in-memory cache absorbs
 // the engine's polling across clients (same pattern as /api/candles).
 const CACHE_MS = 25_000;
+// Yahoo's v7 endpoint takes a long symbol list but not an unbounded one.
+const CHUNK = 60;
+const MAX_SYMBOLS = 300;
 let cache: { at: number; key: string; body: any } | null = null;
 
 export async function GET(req: Request) {
@@ -16,7 +19,7 @@ export async function GET(req: Request) {
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean)
-    .slice(0, 120);
+    .slice(0, MAX_SYMBOLS);
   if (symbols.length === 0) {
     return NextResponse.json({ error: "symbols required" }, { status: 400 });
   }
@@ -26,12 +29,19 @@ export async function GET(req: Request) {
     return NextResponse.json(cache.body);
   }
 
+  // Chunk rather than truncate: this response also carries each symbol's
+  // listing currency, and a dropped symbol would silently render as USD.
   const toOriginal = new Map(symbols.map((s) => [toYahooSymbol(s), s]));
-  const quotes = await fetchYahooV7Quotes(Array.from(toOriginal.keys()));
-  if (!quotes) {
+  const yahooSyms = Array.from(toOriginal.keys());
+  const chunks: string[][] = [];
+  for (let i = 0; i < yahooSyms.length; i += CHUNK) chunks.push(yahooSyms.slice(i, i + CHUNK));
+  const results = await Promise.all(chunks.map((c) => fetchYahooV7Quotes(c)));
+  // A partly-failed batch still beats nothing; only bail when every chunk died.
+  if (results.every((r) => !r)) {
     if (cache && cache.key === key) return NextResponse.json(cache.body); // stale beats nothing
     return NextResponse.json({ error: "upstream unreachable" }, { status: 502 });
   }
+  const quotes = results.flatMap((r) => r ?? []);
 
   // Only symbols currently in an extended session carry the fields; everything
   // else (regular hours, closed, indices, FX) is simply absent from the map.
@@ -39,13 +49,23 @@ export async function GET(req: Request) {
   // Regular-session price (and name, when Yahoo has one) for every symbol —
   // the client uses this as a batched bootstrap so first paint doesn't wait
   // on the per-symbol Finnhub queue.
-  const reg: Record<string, { c: number; pc: number; n?: string }> = {};
+  const reg: Record<
+    string,
+    { c: number; pc: number; n?: string; cc?: string; qt?: string }
+  > = {};
   for (const q of quotes) {
     const sym = toOriginal.get(q.symbol);
     if (!sym) continue;
     if (q.regularMarketPrice == null || q.regularMarketPreviousClose == null) continue;
     const n = q.longName || q.shortName;
-    reg[sym] = { c: q.regularMarketPrice, pc: q.regularMarketPreviousClose, ...(n ? { n } : {}) };
+    reg[sym] = {
+      c: q.regularMarketPrice,
+      pc: q.regularMarketPreviousClose,
+      ...(n ? { n } : {}),
+      // Listing currency + type drive display conversion on the client.
+      ...(q.currency ? { cc: q.currency } : {}),
+      ...(q.quoteType ? { qt: q.quoteType } : {}),
+    };
     const regFields = { regPrice: q.regularMarketPrice, regPrevClose: q.regularMarketPreviousClose };
     if (q.marketState === "PRE" && q.preMarketPrice != null && q.preMarketChange != null) {
       ext[sym] = {
