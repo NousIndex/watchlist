@@ -199,7 +199,22 @@ export function ChartModal({ symbol, onClose }: { symbol: string; onClose: () =>
   // Candle under the finger/cursor while scrubbing (Revolut-style); null when
   // not interacting, so the header falls back to the live price. `price` is in
   // native listing currency, same basis as `live`.
-  const [scrub, setScrub] = useState<{ price: number; time: unknown } | null>(null);
+  const [scrub, setScrub] = useState<{
+    o: number;
+    h: number;
+    l: number;
+    c: number;
+    time: unknown;
+  } | null>(null);
+  // Two-finger measure: the two pinned points (price + time) and their pixel x
+  // for the on-chart marker lines. Null unless two fingers are on the plot.
+  const [measure, setMeasure] = useState<{
+    a: { x: number; open: number; close: number; time: unknown };
+    b: { x: number; open: number; close: number; time: unknown };
+  } | null>(null);
+  const candlesRef = useRef<
+    { time: unknown; open: number; high: number; low: number; close: number }[]
+  >([]);
   const intraday = range === "1D" || range === "1W" || range === "1M";
   const boxRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -251,17 +266,25 @@ export function ChartModal({ symbol, onClose }: { symbol: string; onClose: () =>
     });
 
     // Scrub: mirror the hovered/touched candle into the header, clearing when
-    // the pointer leaves the plot so it snaps back to the live price.
+    // the pointer leaves the plot so it snaps back to the live price. Suppressed
+    // while measuring so the two-finger gesture doesn't fight over the header.
+    let measuring = false;
     chart.subscribeCrosshairMove((param) => {
+      if (measuring) return;
       const bar = param.time && param.point ? (param.seriesData.get(series) as any) : null;
-      const price = bar && (bar.close ?? bar.value);
-      setScrub(price != null && isFinite(price) ? { price, time: param.time } : null);
+      if (!bar || bar.close == null || !isFinite(bar.close)) {
+        setScrub(null);
+        return;
+      }
+      setScrub({ o: bar.open, h: bar.high, l: bar.low, c: bar.close, time: param.time });
     });
 
     let cancelled = false;
     setMsg("Loading…");
     setPeriod(null);
     setScrub(null);
+    setMeasure(null);
+    candlesRef.current = [];
     fetchCandles(symbol, range)
       .then((d: any) => {
         if (cancelled) return;
@@ -270,6 +293,7 @@ export function ChartModal({ symbol, onClose }: { symbol: string; onClose: () =>
           return;
         }
         series.setData(d.candles);
+        candlesRef.current = d.candles;
         chart.timeScale().fitContent();
         setPeriod({
           base: d.candles[0].open,
@@ -284,22 +308,70 @@ export function ChartModal({ symbol, onClose }: { symbol: string; onClose: () =>
     });
     ro.observe(box);
 
+    // Map a touch's screen x to the candle beneath it, snapping the marker line
+    // to that candle's own x for a clean vertical.
+    const pointAt = (clientX: number) => {
+      const rect = box.getBoundingClientRect();
+      const ts = chart.timeScale();
+      const logical = ts.coordinateToLogical(clientX - rect.left);
+      const candles = candlesRef.current;
+      if (logical == null || !candles.length) return null;
+      const i = Math.max(0, Math.min(candles.length - 1, Math.round(logical)));
+      const c = candles[i];
+      if (!c) return null;
+      const cx = ts.logicalToCoordinate(i as any);
+      return { x: cx == null ? clientX - rect.left : cx, open: c.open, close: c.close, time: c.time };
+    };
+
+    // Two-finger measure: take over the gesture (chart pan/zoom off) and report
+    // the delta between the two candles under the fingers.
+    const onTouchStart = (e: TouchEvent) => {
+      if (e.touches.length >= 2) {
+        measuring = true;
+        chart.applyOptions({ handleScroll: false, handleScale: false });
+      }
+    };
+    const onTouchMove = (e: TouchEvent) => {
+      if (e.touches.length < 2) return;
+      e.preventDefault();
+      const p1 = pointAt(e.touches[0].clientX);
+      const p2 = pointAt(e.touches[1].clientX);
+      if (!p1 || !p2) return;
+      setScrub(null);
+      setMeasure(p1.x <= p2.x ? { a: p1, b: p2 } : { a: p2, b: p1 });
+    };
+    const endMeasure = (e: TouchEvent) => {
+      if (e.touches.length >= 2 || !measuring) return;
+      measuring = false;
+      setMeasure(null);
+      chart.applyOptions({ handleScroll: true, handleScale: true });
+    };
+
     // Releasing/leaving the plot ends the scrub — otherwise touch devices keep
     // the crosshair pinned and the header stuck on an old candle.
     const endScrub = () => {
+      if (measuring) return;
       chart.clearCrosshairPosition();
       setScrub(null);
     };
+    const onTouchEnd = (e: TouchEvent) => {
+      endMeasure(e);
+      endScrub();
+    };
+    box.addEventListener("touchstart", onTouchStart, { passive: true });
+    box.addEventListener("touchmove", onTouchMove, { passive: false });
+    box.addEventListener("touchend", onTouchEnd);
+    box.addEventListener("touchcancel", onTouchEnd);
     box.addEventListener("mouseleave", endScrub);
-    box.addEventListener("touchend", endScrub);
-    box.addEventListener("touchcancel", endScrub);
 
     return () => {
       cancelled = true;
       ro.disconnect();
+      box.removeEventListener("touchstart", onTouchStart);
+      box.removeEventListener("touchmove", onTouchMove);
+      box.removeEventListener("touchend", onTouchEnd);
+      box.removeEventListener("touchcancel", onTouchEnd);
       box.removeEventListener("mouseleave", endScrub);
-      box.removeEventListener("touchend", endScrub);
-      box.removeEventListener("touchcancel", endScrub);
       chart.remove();
       chartRef.current = null;
     };
@@ -324,12 +396,18 @@ export function ChartModal({ symbol, onClose }: { symbol: string; onClose: () =>
 
   // While scrubbing, the header shows the pointed candle's price and its change
   // since the start of the visible range; otherwise the live values.
-  const dispPrice = scrub ? scrub.price : live;
-  const scrubChg = scrub && period?.base ? (scrub.price - period.base) * rate : NaN;
-  const scrubPct = scrub && period?.base ? ((scrub.price - period.base) / period.base) * 100 : NaN;
+  const dispPrice = scrub ? scrub.c : live;
+  const scrubChg = scrub && period?.base ? (scrub.c - period.base) * rate : NaN;
+  const scrubPct = scrub && period?.base ? ((scrub.c - period.base) / period.base) * 100 : NaN;
   const dispChg = scrub ? scrubChg : chg;
   const dispPct = scrub ? scrubPct : pct;
   const dispDir = !isFinite(dispChg) || dispChg === 0 ? "muted" : dispChg > 0 ? "up" : "down";
+
+  // Two-finger measure: open of the earlier candle (a) to close of the later
+  // one (b), matching TradingView's O→C convention.
+  const mDelta = measure ? (measure.b.close - measure.a.open) * rate : NaN;
+  const mPct = measure && measure.a.open ? ((measure.b.close - measure.a.open) / measure.a.open) * 100 : NaN;
+  const mDir = !isFinite(mDelta) || mDelta === 0 ? "muted" : mDelta > 0 ? "up" : "down";
 
   return (
     <div className="chart-modal">
@@ -355,6 +433,14 @@ export function ChartModal({ symbol, onClose }: { symbol: string; onClose: () =>
                 </>
               )}
             </div>
+            {scrub && !measure && (
+              <div className="c-ohlc">
+                <span>O<b>{fmtPrice(scrub.o * rate)}</b></span>
+                <span>H<b>{fmtPrice(scrub.h * rate)}</b></span>
+                <span>L<b>{fmtPrice(scrub.l * rate)}</b></span>
+                <span>C<b>{fmtPrice(scrub.c * rate)}</b></span>
+              </div>
+            )}
             {ext && (
               <div className={`c-period ${extDir}`}>
                 <span className={`ext-ico ${ext.state}`}>{ext.state === "pre" ? "☀" : "☾"}</span>{" "}
@@ -391,6 +477,32 @@ export function ChartModal({ symbol, onClose }: { symbol: string; onClose: () =>
               sweep the chart's foreign DOM out (prod-only, on msg toggle). */}
           <div className="chart-host" ref={boxRef} />
           {msg && <div className="chart-msg">{msg}</div>}
+          {measure && (
+            <div className="measure">
+              <div className="m-line" style={{ left: measure.a.x }} />
+              <div className="m-line" style={{ left: measure.b.x }} />
+              <div className="m-pills">
+                <div className="m-pill">
+                  <span className="m-v">
+                    <span className="m-k">O</span>
+                    {fmtPrice(measure.a.open * rate)}
+                  </span>
+                  <span className="m-t">{fmtScrubTime(measure.a.time, intraday)}</span>
+                </div>
+                <div className={`m-pill ${mDir}`}>
+                  <span className="m-v">{fmtChange(mDelta)}</span>
+                  <span className="m-sub">{fmtPct(mPct)}</span>
+                </div>
+                <div className="m-pill">
+                  <span className="m-v">
+                    <span className="m-k">C</span>
+                    {fmtPrice(measure.b.close * rate)}
+                  </span>
+                  <span className="m-t">{fmtScrubTime(measure.b.time, intraday)}</span>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
         {name && <div className="c-name">{name}</div>}
         {/* Binance pairs have no issuer behind them — no statements, no news. */}
