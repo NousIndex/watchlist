@@ -209,6 +209,19 @@ export function TickerOverview({
 
   return (
     <div className="overview">
+      {detail.holdings.length > 0 && (
+        <Section title="Top holdings">
+          <div className="ov-card">
+            {detail.holdings.map((h) => (
+              <div key={h.symbol + h.name} className="ov-fact">
+                <span>{h.symbol || h.name}</span>
+                <span>{h.pct.toFixed(2)}%</span>
+              </div>
+            ))}
+          </div>
+        </Section>
+      )}
+
       {detail.events.length > 0 && (
         <Section title="Events">
           <div className="ev-list">
@@ -218,6 +231,8 @@ export function TickerOverview({
           </div>
         </Section>
       )}
+
+      <Ratings d={detail} rate={rate} currency={currency} live={live} />
 
       {detail.summary && <About summary={detail.summary} name={detail.name} />}
 
@@ -235,21 +250,6 @@ export function TickerOverview({
                 {detail.website.replace(/^https?:\/\//, "").replace(/\/$/, "")} ↗
               </a>
             )}
-          </div>
-        </Section>
-      )}
-
-      <Ratings d={detail} rate={rate} currency={currency} live={live} />
-
-      {detail.holdings.length > 0 && (
-        <Section title="Top holdings">
-          <div className="ov-card">
-            {detail.holdings.map((h) => (
-              <div key={h.symbol + h.name} className="ov-fact">
-                <span>{h.symbol || h.name}</span>
-                <span>{h.pct.toFixed(2)}%</span>
-              </div>
-            ))}
           </div>
         </Section>
       )}

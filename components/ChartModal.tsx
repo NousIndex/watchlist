@@ -14,6 +14,40 @@ const TABS = ["Overview", "Financials", "News"] as const;
 type TabKey = (typeof TABS)[number];
 
 const RANGES = ["1D", "1W", "1M", "6M", "1Y", "5Y"] as const;
+type Range = (typeof RANGES)[number];
+
+// Remember the last range the user picked so it carries across tickers — the
+// modal remounts per symbol, so component state alone would reset to 1D.
+const RANGE_KEY = "chart-range";
+function loadRange(): Range {
+  if (typeof window === "undefined") return "1D";
+  const v = window.localStorage.getItem(RANGE_KEY);
+  return (RANGES as readonly string[]).includes(v ?? "") ? (v as Range) : "1D";
+}
+
+// Label for the point under the finger/cursor while scrubbing the chart.
+// Intraday candles carry a unix-seconds `time` (already shifted to exchange-
+// local and rendered as UTC by lightweight-charts); daily/weekly carry a
+// "YYYY-MM-DD" string, which the library hands back as a BusinessDay object.
+function fmtScrubTime(time: unknown, intraday: boolean): string {
+  let d: Date;
+  if (typeof time === "number") d = new Date(time * 1000);
+  else if (typeof time === "string") d = new Date(time + "T00:00:00Z");
+  else if (time && typeof time === "object") {
+    const b = time as { year: number; month: number; day: number };
+    d = new Date(Date.UTC(b.year, b.month - 1, b.day));
+  } else return "";
+  return intraday
+    ? d.toLocaleString("en-GB", {
+        day: "2-digit",
+        month: "short",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+        timeZone: "UTC",
+      })
+    : d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric", timeZone: "UTC" });
+}
 
 // TradingView-style period P&L label ("+4.38 +10.60% past month"). 1D is
 // excluded — the header already shows the daily change.
@@ -147,13 +181,26 @@ function ListsSheet({ symbol, onClose }: { symbol: string; onClose: () => void }
 }
 
 export function ChartModal({ symbol, onClose }: { symbol: string; onClose: () => void }) {
-  const [range, setRange] = useState<(typeof RANGES)[number]>("1D");
+  const [range, setRange] = useState<Range>(loadRange);
+  const pickRange = (r: Range) => {
+    setRange(r);
+    try {
+      window.localStorage.setItem(RANGE_KEY, r);
+    } catch {
+      /* storage blocked (private mode) — fall back to per-session state */
+    }
+  };
   const [msg, setMsg] = useState("Loading…");
   const [stats, setStats] = useState<Stats | null>(null);
   // First/last candle of the loaded range, for the period P&L line.
   const [period, setPeriod] = useState<{ base: number; last: number } | null>(null);
   const [showLists, setShowLists] = useState(false);
   const [tab, setTab] = useState<TabKey>("Overview");
+  // Candle under the finger/cursor while scrubbing (Revolut-style); null when
+  // not interacting, so the header falls back to the live price. `price` is in
+  // native listing currency, same basis as `live`.
+  const [scrub, setScrub] = useState<{ price: number; time: unknown } | null>(null);
+  const intraday = range === "1D" || range === "1W" || range === "1M";
   const boxRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
 
@@ -203,9 +250,18 @@ export function ChartModal({ symbol, onClose }: { symbol: string; onClose: () =>
       borderVisible: false,
     });
 
+    // Scrub: mirror the hovered/touched candle into the header, clearing when
+    // the pointer leaves the plot so it snaps back to the live price.
+    chart.subscribeCrosshairMove((param) => {
+      const bar = param.time && param.point ? (param.seriesData.get(series) as any) : null;
+      const price = bar && (bar.close ?? bar.value);
+      setScrub(price != null && isFinite(price) ? { price, time: param.time } : null);
+    });
+
     let cancelled = false;
     setMsg("Loading…");
     setPeriod(null);
+    setScrub(null);
     fetchCandles(symbol, range)
       .then((d: any) => {
         if (cancelled) return;
@@ -228,9 +284,22 @@ export function ChartModal({ symbol, onClose }: { symbol: string; onClose: () =>
     });
     ro.observe(box);
 
+    // Releasing/leaving the plot ends the scrub — otherwise touch devices keep
+    // the crosshair pinned and the header stuck on an old candle.
+    const endScrub = () => {
+      chart.clearCrosshairPosition();
+      setScrub(null);
+    };
+    box.addEventListener("mouseleave", endScrub);
+    box.addEventListener("touchend", endScrub);
+    box.addEventListener("touchcancel", endScrub);
+
     return () => {
       cancelled = true;
       ro.disconnect();
+      box.removeEventListener("mouseleave", endScrub);
+      box.removeEventListener("touchend", endScrub);
+      box.removeEventListener("touchcancel", endScrub);
       chart.remove();
       chartRef.current = null;
     };
@@ -243,7 +312,6 @@ export function ChartModal({ symbol, onClose }: { symbol: string; onClose: () =>
   const prev = ext ? ext.regPrevClose : hasData ? quote.prevClose : NaN;
   const chg = isFinite(live) ? (live - prev) * rate : NaN;
   const pct = isFinite(live) && prev ? ((live - prev) / prev) * 100 : NaN;
-  const dir = !isFinite(chg) || chg === 0 ? "muted" : chg > 0 ? "up" : "down";
   const extDir = !ext || ext.chg === 0 ? "muted" : ext.chg > 0 ? "up" : "down";
 
   // Period P&L: live price (falling back to the last candle) vs period start.
@@ -253,6 +321,15 @@ export function ChartModal({ symbol, onClose }: { symbol: string; onClose: () =>
   const pDir = !isFinite(pChg) || pChg === 0 ? "muted" : pChg > 0 ? "up" : "down";
   const crypto = isCrypto(symbol);
   const name = stats?.name || profile?.name || "";
+
+  // While scrubbing, the header shows the pointed candle's price and its change
+  // since the start of the visible range; otherwise the live values.
+  const dispPrice = scrub ? scrub.price : live;
+  const scrubChg = scrub && period?.base ? (scrub.price - period.base) * rate : NaN;
+  const scrubPct = scrub && period?.base ? ((scrub.price - period.base) / period.base) * 100 : NaN;
+  const dispChg = scrub ? scrubChg : chg;
+  const dispPct = scrub ? scrubPct : pct;
+  const dispDir = !isFinite(dispChg) || dispChg === 0 ? "muted" : dispChg > 0 ? "up" : "down";
 
   return (
     <div className="chart-modal">
@@ -265,12 +342,18 @@ export function ChartModal({ symbol, onClose }: { symbol: string; onClose: () =>
               {stats?.exchange ? <span className="c-exch"> · {stats.exchange}</span> : null}
             </div>
             <div className="c-price">
-              {isFinite(live) ? fmtPrice(live * rate) : "—"}{" "}
-              <span className={dir}>
-                {isFinite(chg) ? `${fmtChange(chg)} ${fmtPct(pct)}` : ""}
+              {isFinite(dispPrice) ? fmtPrice(dispPrice * rate) : "—"}{" "}
+              <span className={dispDir}>
+                {isFinite(dispChg) ? `${fmtChange(dispChg)} ${fmtPct(dispPct)}` : ""}
               </span>
-              {ext && <span className="muted"> at close</span>}
-              {shownCcy && <span className="muted"> · {shownCcy}</span>}
+              {scrub ? (
+                <span className="muted"> · {fmtScrubTime(scrub.time, intraday)}</span>
+              ) : (
+                <>
+                  {ext && <span className="muted"> at close</span>}
+                  {shownCcy && <span className="muted"> · {shownCcy}</span>}
+                </>
+              )}
             </div>
             {ext && (
               <div className={`c-period ${extDir}`}>
@@ -297,7 +380,7 @@ export function ChartModal({ symbol, onClose }: { symbol: string; onClose: () =>
       <div className="chart-scroll">
         <div className="ranges">
           {RANGES.map((r) => (
-            <button key={r} className={r === range ? "on" : ""} onClick={() => setRange(r)}>
+            <button key={r} className={r === range ? "on" : ""} onClick={() => pickRange(r)}>
               {r}
             </button>
           ))}
@@ -326,16 +409,6 @@ export function ChartModal({ symbol, onClose }: { symbol: string; onClose: () =>
             ))}
           </div>
         )}
-        {!crypto && tab === "Overview" && (
-          <TickerOverview
-            symbol={symbol}
-            rate={rate}
-            currency={shownCcy ?? currency}
-            live={live}
-          />
-        )}
-        {!crypto && tab === "Financials" && <FinancialsTab symbol={symbol} />}
-        {!crypto && tab === "News" && <NewsTab symbol={symbol} name={name} />}
         {(crypto || tab === "Overview") && (
         <div className="stats">
           <h2>Key stats</h2>
@@ -390,6 +463,16 @@ export function ChartModal({ symbol, onClose }: { symbol: string; onClose: () =>
           </div>
         </div>
         )}
+        {!crypto && tab === "Overview" && (
+          <TickerOverview
+            symbol={symbol}
+            rate={rate}
+            currency={shownCcy ?? currency}
+            live={live}
+          />
+        )}
+        {!crypto && tab === "Financials" && <FinancialsTab symbol={symbol} />}
+        {!crypto && tab === "News" && <NewsTab symbol={symbol} name={name} />}
         {/* The Financials and News tabs carry their own source line. */}
         {(crypto || tab === "Overview") && (
           <div className="empty-hint" style={{ padding: "8px 20px 24px" }}>
