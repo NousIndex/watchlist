@@ -129,7 +129,9 @@ const defaultTabs = (): Tab[] => [
       {
         id: uid(),
         name: null,
-        symbols: [...bn(["TAO", "ONDO", "PYTH", "PENDLE"]), "AKT-USD", ...bn(["HNT"])],
+        // HNT is Yahoo-sourced: Binance halted HNTUSDT in Oct 2022 (Helium's
+        // move to Solana) and has replayed that last tick ever since.
+        symbols: [...bn(["TAO", "ONDO", "PYTH", "PENDLE"]), "AKT-USD", "HNT-USD"],
       },
     ],
   },
@@ -281,10 +283,11 @@ export const useWatchlist = create<WatchlistState>()(
     }),
     {
       name: "sw-watchlist",
-      version: 2,
+      version: 3,
       // v0 -> v1: bring in the seed watchlists for browsers that already have
       // saved state, skipping any tab name the user already has.
       // v1 -> v2: QBTS into Portfolio; AKT/SWEAT (Yahoo-sourced) into the coin tabs.
+      // v2 -> v3: BINANCE:HNTUSDT -> HNT-USD (the Binance pair stopped trading).
       migrate: (persisted: any, version) => {
         if (!persisted?.tabs) return persisted;
         if (version === 0) {
@@ -320,6 +323,17 @@ export const useWatchlist = create<WatchlistState>()(
           addTo("Crypto", "AKT-USD", "BINANCE:FLOKIUSDT");
           addTo("Crypto", "SWEAT-USD", "AKT-USD");
           addTo("Potential", "AKT-USD", "BINANCE:PENDLEUSDT");
+        }
+        if (version <= 2) {
+          // Binance halted HNTUSDT on 2022-10-14 when Helium migrated to
+          // Solana, and its REST endpoints have replayed that final $4.67
+          // tick ever since — the row looked live and was three years cold.
+          // HNT-USD rides the Yahoo path, which still tracks the coin.
+          for (const t of persisted.tabs as Tab[])
+            for (const sec of t.sections)
+              sec.symbols = Array.from(
+                new Set(sec.symbols.map((x) => (x === "BINANCE:HNTUSDT" ? "HNT-USD" : x)))
+              );
         }
         return persisted;
       },
@@ -390,6 +404,11 @@ interface QuoteState {
   meta: Record<string, { cc?: string; qt?: string }>;
   /** 1 USD = n units. Null until /api/fx lands. */
   fxRates: Record<string, number> | null;
+  /** Symbols whose upstream has gone quiet — a Binance pair that stopped
+   * trading keeps serving its last tick forever, so the poll flags it here
+   * instead of writing it. `since` is that final trade. Session-only and
+   * fully replaced each poll, so a pair that resumes clears itself. */
+  stale: Record<string, { since: number }>;
   setQuote: (symbol: string, q: Quote) => void;
   /** Bulk merge — one store update for a whole batch of quotes. */
   setQuotes: (entries: Record<string, Quote>) => void;
@@ -400,6 +419,7 @@ interface QuoteState {
   /** Full replace: symbols that left pre/post-market drop off the map. */
   setExt: (ext: Record<string, ExtQuote>) => void;
   setFxRates: (r: Record<string, number>) => void;
+  setStale: (entries: Record<string, { since: number }>) => void;
 }
 
 export const useQuotes = create<QuoteState>()(
@@ -411,6 +431,7 @@ export const useQuotes = create<QuoteState>()(
       ext: {},
       meta: {},
       fxRates: null,
+      stale: {},
       setQuote: (symbol, q) => set((s) => ({ quotes: { ...s.quotes, [symbol]: q } })),
       setQuotes: (entries) => set((s) => ({ quotes: { ...s.quotes, ...entries } })),
       setPrice: (symbol, price, ts) =>
@@ -424,6 +445,7 @@ export const useQuotes = create<QuoteState>()(
       setMeta: (entries) => set((s) => ({ meta: { ...s.meta, ...entries } })),
       setExt: (ext) => set({ ext }),
       setFxRates: (r) => set({ fxRates: r }),
+      setStale: (stale) => set({ stale }),
     }),
     {
       name: "sw-quotes",

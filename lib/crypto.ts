@@ -53,6 +53,76 @@ export const displaySymbol = (symbol: string) =>
     ? symbol.slice(0, -4)
     : SPECIAL_NAMES[symbol] ?? symbol;
 
+/* ---------------- Halted / delisted pair detection ---------------- */
+
+/**
+ * Binance never stops answering for a pair it has stopped trading — it just
+ * replays the final tick forever. HNTUSDT still reports $4.67: its last trade,
+ * 14 Oct 2022, when Helium migrated to Solana and the pair was halted. Nothing
+ * in the payload says "halted", but two things give it away:
+ *   - the order book is empty (no bid AND no ask), and
+ *   - the rolling 24h window's closeTime stops tracking the present.
+ * Either one is enough; together they cover both a pair seen alone (search)
+ * and one seen in a batch (the poll).
+ */
+export const DEAD_PAIR_MS = 6 * 60 * 60_000;
+
+/** The fields of Binance's /ticker/24hr payload this app reads. */
+export interface BinanceTicker {
+  symbol: string;
+  lastPrice: string;
+  priceChange: string;
+  bidPrice?: string;
+  askPrice?: string;
+  closeTime?: number;
+}
+
+/**
+ * Reference "now" for a batch. Clamped to the freshest closeTime in the same
+ * response so a device clock running fast can't age the whole watchlist past
+ * the threshold at once; a clock running slow only ever under-reports.
+ */
+export function tickerNow(batch: BinanceTicker[]): number {
+  let newest = 0;
+  for (const t of batch)
+    if (typeof t.closeTime === "number" && t.closeTime > newest) newest = t.closeTime;
+  return newest > 0 ? Math.min(Date.now(), newest) : Date.now();
+}
+
+export function isDeadTicker(t: BinanceTicker, now: number): boolean {
+  // An empty book is what a halted pair gives away on its own, with no
+  // healthy sibling in the response to date it against.
+  const bid = parseFloat(t.bidPrice ?? "");
+  const ask = parseFloat(t.askPrice ?? "");
+  if (bid === 0 && ask === 0) return true;
+  return typeof t.closeTime === "number" && now - t.closeTime > DEAD_PAIR_MS;
+}
+
+/** Of these pairs, the ones Binance has stopped trading. One batched call. */
+export async function deadPairs(pairs: string[]): Promise<Set<string>> {
+  const out = new Set<string>();
+  if (pairs.length === 0) return out;
+  try {
+    const r = await fetch(
+      `https://api.binance.com/api/v3/ticker/24hr?symbols=${encodeURIComponent(
+        JSON.stringify(pairs)
+      )}`
+    );
+    if (!r.ok) return out;
+    const d: BinanceTicker[] = await r.json();
+    const now = tickerNow(d);
+    for (const t of d) if (isDeadTicker(t, now)) out.add(t.symbol);
+  } catch {}
+  return out;
+}
+
+/**
+ * "BINANCE:HNTUSDT" -> "HNT-USD": the Yahoo-sourced pair a row falls back to
+ * when Binance stops trading the coin. Yahoo aggregates across exchanges, so
+ * it keeps tracking a coin long after any single venue drops it.
+ */
+export const yahooAlias = (symbol: string) => cryptoBase(symbol) + "-USD";
+
 /* ---------------- Binance pair search ---------------- */
 
 let pairCache: string[] | null = null;
@@ -79,6 +149,8 @@ export interface CryptoResult {
   symbol: string; // with prefix
   pair: string;
   description: string;
+  /** Still listed, but Binance has stopped trading it — the price is history. */
+  dead?: boolean;
 }
 
 export async function searchCrypto(q: string): Promise<CryptoResult[]> {
@@ -94,9 +166,15 @@ export async function searchCrypto(q: string): Promise<CryptoResult[]> {
       return score(a) - score(b);
     })
     .slice(0, 20);
-  return scored.map((p) => ({
-    symbol: CRYPTO_PREFIX + p,
-    pair: p,
-    description: "Binance · Crypto",
-  }));
+  // The pair list carries halted pairs too (that is how a dead ticker gets
+  // added in the first place). Flag them and sink them below the live ones.
+  const dead = await deadPairs(scored);
+  return scored
+    .map((p) => ({
+      symbol: CRYPTO_PREFIX + p,
+      pair: p,
+      description: dead.has(p) ? "Binance · not trading" : "Binance · Crypto",
+      dead: dead.has(p),
+    }))
+    .sort((a, b) => Number(a.dead) - Number(b.dead));
 }

@@ -24,6 +24,10 @@ function RowInner({ symbol, editMode, onOpen, onRemove }: Props) {
   const currency = useWatchlist((s) => s.currency);
   const fxRates = useQuotes((s) => s.fxRates);
   const meta = useQuotes((s) => s.meta[symbol]);
+  // Set when the symbol's own exchange has stopped trading it (a halted
+  // Binance pair keeps serving its last tick, which is how a row can sit at a
+  // 2022 price looking perfectly live).
+  const stale = useQuotes((s) => s.stale[symbol]);
 
   const ref = useRef<HTMLDivElement | null>(null);
   const prevPrice = useRef<number | null>(null);
@@ -71,6 +75,9 @@ function RowInner({ symbol, editMode, onOpen, onRemove }: Props) {
   const chg = isFinite(live) ? (live - prev) * rate : NaN;
   const pct = isFinite(live) && prev ? ((live - prev) / prev) * 100 : NaN;
   const dir = !isFinite(chg) || chg === 0 ? "muted" : chg > 0 ? "up" : "down";
+  // Halted, and the Yahoo fallback hasn't landed either: whatever is on screen
+  // is history, so don't dress it up as a day's move.
+  const orphaned = !!stale && (!quote || Date.now() - quote.ts > 10 * 60_000);
   const extDir = !ext || ext.chg === 0 ? "muted" : ext.chg > 0 ? "up" : "down";
 
   const style = { transform: CSS.Transform.toString(transform), transition };
@@ -103,13 +110,27 @@ function RowInner({ symbol, editMode, onOpen, onRemove }: Props) {
       <div className="mid">
         <div className="sym">{displaySymbol(symbol)}</div>
         <div className="name">
-          {isCrypto(symbol) ? "Binance · 24h" : isYahooCrypto(symbol) ? "Crypto · Yahoo" : profile?.name || batchName || "\u00a0"}
+          {isCrypto(symbol)
+            ? orphaned
+              ? "Binance · not trading"
+              : stale
+              ? "Yahoo · Binance halted"
+              : "Binance · 24h"
+            : isYahooCrypto(symbol)
+            ? "Crypto · Yahoo"
+            : profile?.name || batchName || "\u00a0"}
         </div>
       </div>
       <div className="right">
         <div className={`price ${flash}`}>{fmtPrice(price)}</div>
-        <div className={`chg ${dir}`}>
-          {isFinite(chg) ? `${fmtChange(chg)}  ${fmtPct(pct)}` : quote ? "no data" : "…"}
+        <div className={`chg ${orphaned ? "muted" : dir}`}>
+          {orphaned
+            ? "no longer trading"
+            : isFinite(chg)
+            ? `${fmtChange(chg)}  ${fmtPct(pct)}`
+            : quote
+            ? "no data"
+            : "…"}
         </div>
         {ext && (
           <div className={`ext ${extDir}`}>

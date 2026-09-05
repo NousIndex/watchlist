@@ -1,6 +1,16 @@
 "use client";
 import { useQuotes, useWatchlist, allSymbols } from "./store";
-import { isCrypto, isYahooOnly, cryptoPair, CRYPTO_PREFIX } from "./crypto";
+import {
+  isCrypto,
+  isYahooOnly,
+  cryptoPair,
+  CRYPTO_PREFIX,
+  isDeadTicker,
+  tickerNow,
+  yahooAlias,
+  type BinanceTicker,
+} from "./crypto";
+import type { ExtQuote } from "./types";
 
 /**
  * QuoteEngine
@@ -19,6 +29,10 @@ import { isCrypto, isYahooOnly, cryptoPair, CRYPTO_PREFIX } from "./crypto";
  * Crypto (Binance public API, no key, browser-direct):
  * - One batched REST call every 10s covers ALL crypto symbols at once.
  * - Websocket miniTicker streams visible pairs live (~1s ticks).
+ * - A pair Binance has stopped trading keeps answering with its final tick
+ *   forever (see isDeadTicker). Those are dropped from both the poll and the
+ *   websocket, and picked up instead by the Yahoo batch under their XXX-USD
+ *   alias, so the row shows a live price rather than a frozen one.
  */
 
 const TICK_MS = 1300;
@@ -47,6 +61,8 @@ class QuoteEngine {
   private fhRetry = 1000;
 
   // Binance
+  /** Watched crypto whose Binance pair has stopped trading (stored symbols). */
+  private deadCrypto = new Set<string>();
   private bnWs: WebSocket | null = null;
   private bnSubs = new Set<string>(); // lowercase pairs
   private bnRetry = 1000;
@@ -196,19 +212,45 @@ class QuoteEngine {
       )}`;
       const r = await fetch(url);
       if (!r.ok) return;
-      const d: any[] = await r.json();
+      const d: BinanceTicker[] = await r.json();
       const st = useQuotes.getState();
       const now = Date.now();
+      const ref = tickerNow(d);
+      const dead = new Set<string>();
+      const stale: Record<string, { since: number }> = {};
+      const batch: Record<string, { price: number; prevClose: number; ts: number }> = {};
       for (const t of d) {
+        const sym = CRYPTO_PREFIX + t.symbol;
+        // A halted pair still answers, with the last trade it ever saw.
+        // Writing that would stamp a years-old price with a fresh timestamp
+        // and overwrite the Yahoo fallback on every poll.
+        if (isDeadTicker(t, ref)) {
+          dead.add(sym);
+          stale[sym] = { since: t.closeTime ?? 0 };
+          continue;
+        }
         const price = parseFloat(t.lastPrice);
         const change = parseFloat(t.priceChange);
         if (isFinite(price)) {
-          st.setQuote(CRYPTO_PREFIX + t.symbol, {
+          batch[sym] = {
             price,
             prevClose: price - (isFinite(change) ? change : 0), // 24h-ago basis
             ts: now,
-          });
+          };
         }
+      }
+      if (Object.keys(batch).length) st.setQuotes(batch);
+
+      const changed =
+        dead.size !== this.deadCrypto.size || Array.from(dead).some((s) => !this.deadCrypto.has(s));
+      this.deadCrypto = dead;
+      // Only write when the set actually moved: a fresh object every 10s would
+      // re-render every flagged row for nothing.
+      const prev = st.stale;
+      if (changed || Object.keys(prev).length !== Object.keys(stale).length) st.setStale(stale);
+      if (changed) {
+        this.syncSubs(); // stop streaming a pair that will never tick
+        this.pollExtended(); // pull the fallback quote in now, not in 30s
       }
     } catch {}
   }
@@ -219,14 +261,33 @@ class QuoteEngine {
     if (document.hidden) return;
     // Binance crypto has its own batched poll; Yahoo-sourced crypto (AKT-USD)
     // rides along here for the regular-price bootstrap (it never has ext data).
-    const syms = allSymbols(useWatchlist.getState().tabs).filter((s) => !isCrypto(s));
+    // Crypto whose Binance pair has stopped trading rides along too, under its
+    // Yahoo alias (BINANCE:HNTUSDT -> HNT-USD), so the row keeps a live price.
+    // targets maps what we ask Yahoo for -> the rows that answer feeds, since
+    // an alias can collide with a symbol the user already holds directly.
+    const targets = new Map<string, string[]>();
+    const want = (req: string, row: string) => {
+      const rows = targets.get(req);
+      if (!rows) targets.set(req, [row]);
+      else if (!rows.includes(row)) rows.push(row);
+    };
+    for (const s of allSymbols(useWatchlist.getState().tabs)) {
+      if (!isCrypto(s)) want(s, s);
+      else if (this.deadCrypto.has(s)) want(yahooAlias(s), s);
+    }
+    const syms = Array.from(targets.keys());
     if (syms.length === 0) return;
     try {
       const r = await fetch(`/api/extended?symbols=${encodeURIComponent(syms.join(","))}`);
       if (!r.ok) return;
       const d = await r.json();
       const st = useQuotes.getState();
-      if (d && typeof d.ext === "object" && d.ext) st.setExt(d.ext);
+      if (d && typeof d.ext === "object" && d.ext) {
+        const ext: Record<string, ExtQuote> = {};
+        for (const [sym, v] of Object.entries<any>(d.ext))
+          for (const row of targets.get(sym) ?? [sym]) ext[row] = v;
+        st.setExt(ext);
+      }
       // Batched regular prices: fills every row in one round trip on load,
       // then tops up whatever the Finnhub queue hasn't reached. Skip anything
       // updated recently — a live websocket tick beats Yahoo's snapshot.
@@ -236,14 +297,16 @@ class QuoteEngine {
         const names: Record<string, string> = {};
         const meta: Record<string, { cc?: string; qt?: string }> = {};
         for (const [sym, q] of Object.entries<any>(d.reg)) {
-          if (typeof q.n === "string" && q.n && q.n !== st.names[sym]) names[sym] = q.n;
-          const prev = st.meta[sym];
-          if ((q.cc || q.qt) && (prev?.cc !== q.cc || prev?.qt !== q.qt))
-            meta[sym] = { cc: q.cc, qt: q.qt };
-          const cur = st.quotes[sym];
-          if (cur && now - cur.ts < BATCH_FRESH_MS) continue;
-          if (typeof q.c === "number" && q.c > 0)
-            batch[sym] = { price: q.c, prevClose: q.pc || q.c, ts: now };
+          for (const row of targets.get(sym) ?? [sym]) {
+            if (typeof q.n === "string" && q.n && q.n !== st.names[row]) names[row] = q.n;
+            const prev = st.meta[row];
+            if ((q.cc || q.qt) && (prev?.cc !== q.cc || prev?.qt !== q.qt))
+              meta[row] = { cc: q.cc, qt: q.qt };
+            const cur = st.quotes[row];
+            if (cur && now - cur.ts < BATCH_FRESH_MS) continue;
+            if (typeof q.c === "number" && q.c > 0)
+              batch[row] = { price: q.c, prevClose: q.pc || q.c, ts: now };
+          }
         }
         if (Object.keys(batch).length) st.setQuotes(batch);
         if (Object.keys(names).length) st.setNames(names);
@@ -370,7 +433,9 @@ class QuoteEngine {
     // Binance: visible crypto pairs (lowercase stream names)
     if (this.bnWs && this.bnWs.readyState === WebSocket.OPEN) {
       const desired = new Set(
-        vis.filter(isCrypto).map((s) => cryptoPair(s).toLowerCase())
+        vis
+          .filter((s) => isCrypto(s) && !this.deadCrypto.has(s))
+          .map((s) => cryptoPair(s).toLowerCase())
       );
       const unsub = Array.from(this.bnSubs).filter((p) => !desired.has(p));
       const sub = Array.from(desired).filter((p) => !this.bnSubs.has(p));

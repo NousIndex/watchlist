@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { createChart, ColorType, type IChartApi } from "lightweight-charts";
 import { useQuotes, useWatchlist, tabsWithSymbol } from "@/lib/store";
 import { fmtPrice, fmtChange, fmtPct, fmtBig } from "@/lib/format";
-import { isCrypto, cryptoPair, cryptoBase, displaySymbol } from "@/lib/crypto";
+import { isCrypto, cryptoPair, cryptoBase, displaySymbol, yahooAlias } from "@/lib/crypto";
 import { convertTo } from "@/lib/fx";
 import { Avatar } from "./Avatar";
 import { TickerOverview } from "./TickerOverview";
@@ -68,8 +68,18 @@ const BN_RANGES: Record<string, { interval: string; limit: number; intraday: boo
   "5Y": { interval: "1w", limit: 265, intraday: false },
 };
 
+/**
+ * Binance owns a crypto row's data — unless it has stopped trading the pair.
+ * Then the row is already living on the Yahoo fallback and the chart has to
+ * follow it, or it draws a candle history that ends the day the pair halted.
+ */
+const liveOnBinance = (symbol: string) => isCrypto(symbol) && !useQuotes.getState().stale[symbol];
+
+/** What to ask the Yahoo-backed routes for: a halted pair goes by its alias. */
+const dataSymbol = (symbol: string) => (isCrypto(symbol) ? yahooAlias(symbol) : symbol);
+
 async function fetchCandles(symbol: string, range: string) {
-  if (isCrypto(symbol)) {
+  if (liveOnBinance(symbol)) {
     const cfg = BN_RANGES[range];
     const r = await fetch(
       `https://api.binance.com/api/v3/klines?symbol=${cryptoPair(symbol)}&interval=${cfg.interval}&limit=${cfg.limit}`
@@ -88,7 +98,9 @@ async function fetchCandles(symbol: string, range: string) {
     });
     return { candles };
   }
-  const r = await fetch(`/api/candles?symbol=${encodeURIComponent(symbol)}&range=${range}`);
+  const r = await fetch(
+    `/api/candles?symbol=${encodeURIComponent(dataSymbol(symbol))}&range=${range}`
+  );
   const d = await r.json();
   if (!r.ok) return { error: d.error || "no data" };
   return d;
@@ -113,7 +125,7 @@ interface Stats {
 }
 
 async function fetchStats(symbol: string): Promise<Stats | null> {
-  if (isCrypto(symbol)) {
+  if (liveOnBinance(symbol)) {
     const r = await fetch(
       `https://api.binance.com/api/v3/ticker/24hr?symbol=${cryptoPair(symbol)}`
     );
@@ -131,7 +143,7 @@ async function fetchStats(symbol: string): Promise<Stats | null> {
       marketCap: parseFloat(d.quoteVolume), // repurposed below as 24h quote volume
     };
   }
-  const r = await fetch(`/api/stats?symbol=${encodeURIComponent(symbol)}`);
+  const r = await fetch(`/api/stats?symbol=${encodeURIComponent(dataSymbol(symbol))}`);
   if (!r.ok) return null;
   return r.json();
 }
