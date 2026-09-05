@@ -170,11 +170,22 @@ class QuoteEngine {
               ts: Date.now(),
             });
           } else {
-            useQuotes.getState().setQuote(job.symbol, {
-              price: NaN,
-              prevClose: NaN,
-              ts: Date.now(),
-            });
+            // c: null is a real "nobody can quote this symbol" — and also what
+            // a throttled Yahoo looks like, which is common enough that
+            // lib/yahoo.ts fights it with browser ciphers and a session
+            // cookie. Only claim no data when there is nothing to lose;
+            // otherwise keep the last good price and record the attempt, so
+            // the queue backs off without the row flashing "no data" over a
+            // price that is still perfectly valid.
+            const cur = useQuotes.getState().quotes[job.symbol];
+            useQuotes
+              .getState()
+              .setQuote(
+                job.symbol,
+                cur && isFinite(cur.price)
+                  ? { ...cur, ts: Date.now() }
+                  : { price: NaN, prevClose: NaN, ts: Date.now() }
+              );
           }
         }
       } else {
@@ -417,7 +428,12 @@ class QuoteEngine {
 
     // Finnhub: visible non-crypto
     if (this.fhWs && this.fhWs.readyState === WebSocket.OPEN) {
-      const desired = new Set(vis.filter((s) => !isCrypto(s)).slice(0, MAX_WS_SUBS));
+      // The same exclusion the REST queue makes: Finnhub can't tick indices,
+      // futures, FX, non-US listings or Yahoo-sourced crypto, and a slot spent
+      // on one is a slot a US ticker doesn't get live streaming on.
+      const desired = new Set(
+        vis.filter((s) => !isCrypto(s) && !isYahooOnly(s)).slice(0, MAX_WS_SUBS)
+      );
       for (const s of Array.from(this.fhSubs))
         if (!desired.has(s)) {
           this.fhWs.send(JSON.stringify({ type: "unsubscribe", symbol: s }));
